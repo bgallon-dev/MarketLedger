@@ -1433,7 +1433,7 @@ def run_pipeline(
                 decision_log,
                 audited_df[["Ticker", "Altman Z-Score", "Distress Risk", "Price"]],
             )
-            if "Distress Risk" in audited_df.columns:
+            if cfg.enable_distress_gate and "Distress Risk" in audited_df.columns:
                 safe_picks = audited_df[audited_df["Distress Risk"] == "SAFE"].copy()
             else:
                 safe_picks = audited_df.copy()
@@ -1441,7 +1441,10 @@ def run_pipeline(
             safe_picks = pd.DataFrame(columns=["Ticker"])
 
         if verbose:
-            print(f"  -> SAFE after forensic: {len(safe_picks)}")
+            if cfg.enable_distress_gate:
+                print(f"  -> SAFE after forensic: {len(safe_picks)}")
+            else:
+                print(f"  -> Distress gate disabled; carrying forward: {len(safe_picks)}")
         _stop_stage("forensic")
         return {
             "decision_log": decision_log,
@@ -1458,7 +1461,7 @@ def run_pipeline(
         audited_df = context.get("audited_df", pd.DataFrame(columns=["Ticker"]))
         if audited_df.empty:
             safe_picks = pd.DataFrame(columns=["Ticker"])
-        elif "Distress Risk" in audited_df.columns:
+        elif cfg.enable_distress_gate and "Distress Risk" in audited_df.columns:
             safe_picks = audited_df[audited_df["Distress Risk"] == "SAFE"].copy()
         else:
             safe_picks = audited_df.copy()
@@ -1706,99 +1709,202 @@ def run_pipeline(
     return final_context.get("final_portfolio", pd.DataFrame())
 
 
-def main():
-    """Command-line entry point."""
+class _MainHelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter
+):
+    pass
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build CLI parser for pipeline execution."""
     parser = argparse.ArgumentParser(
         description="Automated Investment Pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=_MainHelpFormatter,
         epilog="""
 Examples:
-  python main.py                    Run with cached data
-  python main.py --update           Refresh data before running
-  python main.py --exchange NASDAQ  Screen NASDAQ stocks
-  python main.py --no-momentum      Include stocks below 200-day MA
-  python main.py --strict           Fail on data contract violations
+  py -m main                                         Run with cached data
+  py -m main --update --strict                       Refresh and fail on contract violations
+  py -m main --exchange NASDAQ --no-momentum         Screen NASDAQ without momentum filter
+  py -m main --no-parallel --no-tail-cache           Disable all stage parallelism and tail cache
+  py -m main --no-parallel-tail --max-workers 2      Disable only tail stage parallelism
         """,
     )
-    parser.add_argument(
+
+    data_group = parser.add_argument_group("Data Selection")
+    data_group.add_argument(
         "--update",
         action="store_true",
-        help="Fetch fresh data before running analysis",
+        help="Fetch fresh data before running analysis.",
     )
-    parser.add_argument(
+    data_group.add_argument(
         "--exchange",
         default=None,
-        help="Target universe (SP500, NASDAQ, etc.)",
+        help="Target universe label (SP500, NASDAQ, NYSE, CUSTOM, etc.).",
     )
-    parser.add_argument(
+
+    gate_group = parser.add_argument_group("Risk and Gate Controls")
+    gate_group.add_argument(
         "--no-momentum",
         action="store_true",
-        help="Disable momentum filter (include stocks below 200-day MA)",
+        help="Disable momentum filter and momentum gate requirement.",
     )
-    parser.add_argument(
+    gate_group.add_argument(
+        "--no-distress-gate",
+        action="store_true",
+        help="Disable distress gate (do not require Distress Risk == SAFE).",
+    )
+    gate_group.add_argument(
+        "--no-tail-gate",
+        action="store_true",
+        help="Disable tail-risk gate.",
+    )
+    gate_group.add_argument(
+        "--no-valuation-gate",
+        action="store_true",
+        help="Disable valuation sanity gate.",
+    )
+
+    execution_group = parser.add_argument_group("Execution Controls")
+    execution_group.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Override worker count for parallel stages.",
+    )
+    execution_group.add_argument(
+        "--no-bulk-prefetch",
+        action="store_true",
+        help="Disable bulk DB prefetch optimization.",
+    )
+    execution_group.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Disable all forensic/valuation/tail stage parallel execution.",
+    )
+    execution_group.add_argument(
+        "--no-parallel-forensic",
+        action="store_true",
+        help="Disable forensic stage parallel execution only.",
+    )
+    execution_group.add_argument(
+        "--no-parallel-valuation",
+        action="store_true",
+        help="Disable valuation stage parallel execution only.",
+    )
+    execution_group.add_argument(
+        "--no-parallel-tail",
+        action="store_true",
+        help="Disable tail-risk stage parallel execution only.",
+    )
+    execution_group.add_argument(
+        "--no-tail-cache",
+        action="store_true",
+        help="Disable in-run tail fit caching.",
+    )
+
+    output_group = parser.add_argument_group("Output and Validation")
+    output_group.add_argument(
         "--output",
         "-o",
         type=str,
         default=None,
-        help="Output file path for results CSV",
+        help="Output file path for results CSV.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--quiet",
         "-q",
         action="store_true",
-        help="Suppress progress messages",
+        help="Suppress progress messages.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--strict",
         action="store_true",
-        help="Enable strict data contract validation (fail on violations)",
+        help="Enable strict data contract validation (fail on violations).",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--selected-only",
         action="store_true",
-        help="Skip exporting rejected assets to the decision log",
+        help="Skip exporting rejected assets to the decision log.",
     )
-    parser.add_argument(
+    output_group.add_argument(
         "--no-decision-log",
         action="store_true",
-        help="Disable decision log CSV export",
-    )
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=None,
-        help="Override worker count for parallel stages",
-    )
-    parser.add_argument(
-        "--no-bulk-prefetch",
-        action="store_true",
-        help="Disable bulk DB prefetch optimization",
-    )
-    parser.add_argument(
-        "--no-parallel",
-        action="store_true",
-        help="Disable parallel forensic/valuation/tail execution",
-    )
-    parser.add_argument(
-        "--no-tail-cache",
-        action="store_true",
-        help="Disable in-run tail fit caching",
-    )
-    parser.add_argument(
-        "--legacy-pipeline",
-        action="store_true",
-        help="Use deprecated chronological pipeline for debugging",
+        help="Disable decision log CSV export.",
     )
 
-    args = parser.parse_args()
-    execution_config = ExecutionConfig(
+    compatibility_group = parser.add_argument_group("Compatibility")
+    compatibility_group.add_argument(
+        "--legacy-pipeline",
+        action="store_true",
+        help="Use deprecated chronological pipeline for debugging.",
+    )
+    return parser
+
+
+def _validate_legacy_arg_compat(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if not args.legacy_pipeline:
+        return
+
+    incompatible_flags = []
+    if args.no_distress_gate:
+        incompatible_flags.append("--no-distress-gate")
+    if args.no_tail_gate:
+        incompatible_flags.append("--no-tail-gate")
+    if args.no_valuation_gate:
+        incompatible_flags.append("--no-valuation-gate")
+    if args.no_parallel_forensic:
+        incompatible_flags.append("--no-parallel-forensic")
+    if args.no_parallel_valuation:
+        incompatible_flags.append("--no-parallel-valuation")
+    if args.no_parallel_tail:
+        incompatible_flags.append("--no-parallel-tail")
+
+    if incompatible_flags:
+        parser.error(
+            "--legacy-pipeline cannot be combined with advanced flags: "
+            + ", ".join(incompatible_flags)
+        )
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    _validate_legacy_arg_compat(parser, args)
+    return args
+
+
+def build_execution_config(args: argparse.Namespace) -> ExecutionConfig:
+    disable_all_parallel = args.no_parallel
+    return ExecutionConfig(
         max_workers=args.max_workers,
         enable_bulk_prefetch=not args.no_bulk_prefetch,
         enable_tail_cache=not args.no_tail_cache,
-        enable_parallel_forensic=not args.no_parallel,
-        enable_parallel_valuation=not args.no_parallel,
-        enable_parallel_tail=not args.no_parallel,
+        enable_parallel_forensic=not (
+            disable_all_parallel or args.no_parallel_forensic
+        ),
+        enable_parallel_valuation=not (
+            disable_all_parallel or args.no_parallel_valuation
+        ),
+        enable_parallel_tail=not (disable_all_parallel or args.no_parallel_tail),
     )
+
+
+def build_risk_config(args: argparse.Namespace) -> RiskVectorConfig:
+    return RiskVectorConfig(
+        enable_distress_gate=not args.no_distress_gate,
+        enable_tail_gate=not args.no_tail_gate,
+        enable_momentum_gate=not args.no_momentum,
+        enable_valuation_gate=not args.no_valuation_gate,
+    )
+
+
+def main(argv=None):
+    """Command-line entry point."""
+    args = parse_args(argv)
+    execution_config = build_execution_config(args)
+    risk_config = build_risk_config(args)
 
     # Run the pipeline
     result = run_pipeline(
@@ -1810,6 +1916,7 @@ Examples:
         strict_contracts=args.strict,
         include_rejected=not args.selected_only,
         export_decision_log=not args.no_decision_log,
+        risk_config=risk_config,
         execution_config=execution_config,
         use_legacy_debug=args.legacy_pipeline,
     )

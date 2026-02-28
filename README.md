@@ -187,20 +187,41 @@ Why this matters: ingestion determines all downstream data quality and coverage.
 CLI entrypoint:
 
 ```powershell
-py -m data.data [tickers...] [--exchange EXCHANGE]
+py -m data.data [tickers...] [--ticker SYMBOL ...] [--ticker-file FILE ...] [--universe {nyse,nasdaq,sp500} ...] [--exchange EXCHANGE]
 ```
 
 ### Arguments
 
 | Argument | Effect | Example |
 | --- | --- | --- |
-| `tickers` (positional, optional) | Fetch only specified symbols. | `py -m data.data AAPL MSFT` |
-| `--exchange` | Sets exchange label saved with symbols (default `CUSTOM` when tickers are specified). | `py -m data.data AAPL --exchange NASDAQ` |
-| `--TICKER` style unknown flags | Also parsed as tickers via `parse_known_args()` fallback. | `py -m data.data --AAPL --MSFT` |
+| `tickers` (positional, optional) | Positional symbols to ingest. | `py -m data.data AAPL MSFT` |
+| `--ticker` (repeatable) | Explicit symbol argument, merged with positional symbols. | `py -m data.data --ticker AAPL --ticker MSFT` |
+| `--ticker-file` (repeatable) | File with one symbol per line, merged with other sources. | `py -m data.data --ticker-file .\my_tickers.txt` |
+| `--universe` (repeatable) | Built-in symbol sets: `nyse`, `nasdaq`, `sp500`. | `py -m data.data --universe nyse --universe nasdaq` |
+| `--exchange` | Exchange label for positional/`--ticker`/`--ticker-file` symbols (default `CUSTOM`). | `py -m data.data AAPL --exchange NASDAQ` |
+| `--quiet`, `-q` | Suppresses status output. | `py -m data.data --quiet --ticker AAPL` |
+| `--no-progress` | Disables tqdm progress bars. | `py -m data.data --no-progress --ticker-file .\my_tickers.txt` |
+
+### Source merge and dedupe behavior
+
+Input sources are merged in deterministic order:
+
+1. positional `tickers`
+2. `--ticker`
+3. `--ticker-file`
+4. `--universe`
+
+Rules:
+
+- Symbols are normalized to uppercase.
+- Duplicates are removed while preserving first-seen order.
+- If a symbol appears from multiple sources, the first source keeps ownership of its exchange label.
+- If no sources are provided, ingestion defaults to `--universe nyse`.
+- Unknown flags like `--AAPL` are now invalid and fail fast (no fallback parsing).
 
 ### Default behavior with no tickers
 
-If no tickers are provided, ingestion calls `fetch_nyse_data()` and reads:
+If no input source is provided, ingestion defaults to NYSE universe symbols from:
 
 - `Utils/nyse_tickers.txt`
 
@@ -239,11 +260,21 @@ py -m main [flags]
 | `--strict` | Enforces data contracts as hard failures. | High-integrity CI-like runs. |
 | `--selected-only` | Do not include rejected assets in decision log export intent. | Smaller operational artifacts. |
 | `--no-decision-log` | Disables decision log CSV export entirely. | Output minimization. |
+| `--no-distress-gate` | Disables distress gate so non-`SAFE` names can flow into valuation/risk stages. | Distress gate sensitivity analysis. |
+| `--no-tail-gate` | Disables tail-risk rejection gate. | Evaluate impact of heavy-tail filtering. |
+| `--no-valuation-gate` | Disables valuation sanity rejection gate. | Investigate borderline valuation sanity cases. |
 | `--max-workers` | Overrides parallel worker count (`ExecutionConfig`). | Runtime tuning / DB contention control. |
 | `--no-bulk-prefetch` | Disables bulk prefetch optimization before forensic/valuation/tail steps. | Debug data-fetch path behavior. |
-| `--no-parallel` | Disables parallel forensic/valuation/tail stages. | Diagnose threading/contention issues. |
+| `--no-parallel` | Disables parallel forensic/valuation/tail stages (global alias). | Diagnose threading/contention issues quickly. |
+| `--no-parallel-forensic` | Disables forensic parallel execution only. | Isolate forensic-stage contention issues. |
+| `--no-parallel-valuation` | Disables valuation parallel execution only. | Isolate valuation-stage contention issues. |
+| `--no-parallel-tail` | Disables tail-fit parallel execution only. | Isolate tail-stage contention issues. |
 | `--no-tail-cache` | Disables in-run tail-fit caching. | Validate uncached tail-fit behavior. |
 | `--legacy-pipeline` | Uses deprecated chronological fallback path. | Regression debugging only. |
+
+Compatibility note:
+
+- `--legacy-pipeline` cannot be combined with advanced flags: `--no-distress-gate`, `--no-tail-gate`, `--no-valuation-gate`, `--no-parallel-forensic`, `--no-parallel-valuation`, `--no-parallel-tail`.
 
 ### Recommended operator profiles
 
@@ -277,7 +308,7 @@ The main run uses a DAG with 10 nodes:
 2. `strategy_candidates_node`: strategy screen with default portfolio combos.
 3. `prefetch_data_node`: bulk prefetch of history/fundamentals.
 4. `forensic_node`: Altman Z forensic scoring and SAFE filtering prep.
-5. `safe_filter_node`: extracts `Distress Risk == SAFE`.
+5. `safe_filter_node`: applies `Distress Risk == SAFE` only when distress gate is enabled.
 6. `valuation_node`: scenario valuation + confidence fields.
 7. `tail_risk_node`: distribution fit and tail-risk enrichment.
 8. `risk_vector_node`: attaches `RV_*`, applies gates, sets `Decision*` fields.
@@ -532,6 +563,7 @@ Fix options:
 
 - lower workers: `--max-workers 1` or `--max-workers 2`
 - disable parallelism entirely: `--no-parallel`
+- disable only one stage: `--no-parallel-forensic` or `--no-parallel-valuation` or `--no-parallel-tail`
 - disable bulk prefetch for debugging: `--no-bulk-prefetch`
 
 ### HTML styling missing

@@ -29,16 +29,11 @@ Usage:
 import pandas as pd
 import numpy as np
 import os
-import sys
-from pathlib import Path
 from typing import Optional, Dict, Tuple, Any, Iterable
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Add pyfinancial to path to import database module
-SCRIPT_DIR = Path(__file__).parent
-sys.path.insert(0, str(SCRIPT_DIR / "pyfinancial"))
-from pyfinancial.database.database import (
+from database.database import (
     get_ticker_history,
     get_financial_data,
     get_ticker_history_bulk,
@@ -588,8 +583,9 @@ def _history_map_from_bulk(df: Optional[pd.DataFrame]) -> Dict[str, pd.DataFrame
     work = df.copy()
     work["symbol"] = work["symbol"].astype(str).str.upper()
     for symbol, grp in work.groupby("symbol", sort=False):
+        symbol_key = str(symbol).strip().upper()
         cols = [c for c in grp.columns if c != "symbol"]
-        out[symbol] = grp[cols].sort_values("date").reset_index(drop=True)
+        out[symbol_key] = grp[cols].sort_values("date").reset_index(drop=True)
     return out
 
 
@@ -600,7 +596,8 @@ def _financial_map_from_bulk(df: Optional[pd.DataFrame]) -> Dict[str, pd.DataFra
     work = df.copy()
     work["symbol"] = work["symbol"].astype(str).str.upper()
     for symbol, grp in work.groupby("symbol", sort=False):
-        out[symbol] = grp.pivot(index="metric", columns="period", values="value")
+        symbol_key = str(symbol).strip().upper()
+        out[symbol_key] = grp.pivot(index="metric", columns="period", values="value")
     return out
 
 

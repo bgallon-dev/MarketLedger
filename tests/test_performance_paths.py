@@ -1,8 +1,8 @@
 import pandas as pd
 
-from pyfinancial.forensic import forensic_scan
-from pyfinancial.valuation import valuation_projector
-from pyfinancial.Utils.backtester import VectorBacktester
+from forensic import forensic_scan
+from valuation import valuation_projector
+from Utils.backtester import VectorBacktester
 
 
 def _sample_balance_sheet() -> pd.DataFrame:

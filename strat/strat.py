@@ -8,7 +8,7 @@ This module provides a flexible framework for:
 
 Usage:
 ------
-    from pyfinancial.strat import StrategyEngine, Portfolio
+    from strat.strat import StrategyEngine, Portfolio
 
     # Quick usage with defaults
     engine = StrategyEngine()
@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Callable, Any, Protocol
 
-import pyfinancial.database.database as db
+import database.database as db
 
 
 # ==============================================================================
@@ -676,7 +676,7 @@ class StrategyEngine:
         if config.min_market_cap_mm > 0 and "OrdinarySharesNumber" in df.columns:
             prices = self.data_provider.get_prices(df.index.tolist(), trade_date)
             df = df.copy()
-            df["_CurrentPrice"] = df.index.map(prices)
+            df["_CurrentPrice"] = prices.reindex(df.index)
             df["MarketCap"] = (
                 df["OrdinarySharesNumber"] * df["_CurrentPrice"]
             ) / 1_000_000
@@ -801,7 +801,7 @@ class StrategyEngine:
                 tickers = passed.index.tolist()
                 rejected = momentum_data[momentum_data["Above_MA"] != True]
                 momentum_rejected = rejected.index.tolist()
-                momentum_diagnostics = (
+                diagnostics_records = (
                     momentum_data.reset_index()
                     .rename(
                         columns={
@@ -810,6 +810,10 @@ class StrategyEngine:
                     )
                     .to_dict("records")
                 )
+                momentum_diagnostics = [
+                    {str(key): value for key, value in record.items()}
+                    for record in diagnostics_records
+                ]
             else:
                 tickers = self._apply_momentum_filter(tickers, trade_date)
             tickers = tickers[:top_n]  # Trim to requested count

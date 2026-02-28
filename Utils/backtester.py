@@ -16,15 +16,16 @@ import pandas as pd
 import numpy as np
 import os
 import time
+from numbers import Real
 from datetime import timedelta, datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Any, cast
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pyfinancial.database.database import get_connection, query_database, ensure_indices
-from pyfinancial.Utils.scoring import robust_score
-from pyfinancial.risk.risk_vector import RiskVectorConfig, attach_risk_vectors
-from pyfinancial.valuation.valuation_projector import (
+from database.database import get_connection, query_database, ensure_indices
+from Utils.scoring import robust_score
+from risk.risk_vector import RiskVectorConfig, attach_risk_vectors
+from valuation.valuation_projector import (
     calculate_scenario_valuations,
     check_valuation_sanity,
 )
@@ -55,6 +56,31 @@ REQUIRED_METRICS = [
     "RetainedEarnings",
     "TotalLiabilitiesNetMinorityInterest",
 ]
+
+
+def _require_real(value: Any, field_name: str) -> float:
+    """
+    Validate that a value is a non-missing real number and convert it to float.
+
+    Raises:
+        TypeError: If the value is missing or not a real numeric type.
+    """
+    if value is None:
+        raise TypeError(f"{field_name} must be a real number, got None")
+    if isinstance(value, bool):
+        raise TypeError(f"{field_name} must be a real number, got bool")
+    try:
+        missing = pd.isna(value)
+    except Exception:
+        # Some objects may not support pandas null checks.
+        missing = False
+    if isinstance(missing, (bool, np.bool_)) and missing:
+        raise TypeError(f"{field_name} must be a real number, got missing value")
+    if not isinstance(value, Real):
+        raise TypeError(
+            f"{field_name} must be a real number, got {type(value).__name__}"
+        )
+    return float(value)
 
 
 class VectorBacktester:
@@ -1295,8 +1321,8 @@ class VectorBacktester:
                 self._tail_state_cache[cache_key] = result
             return dict(result)
 
-        kurt_fisher = float(returns.kurtosis())
-        skewness = float(returns.skew())
+        kurt_fisher = _require_real(returns.kurtosis(), "kurtosis")
+        skewness = _require_real(returns.skew(), "skewness")
 
         if kurt_fisher > 2.0:
             bucket = "Heavy"
@@ -1395,18 +1421,28 @@ class VectorBacktester:
         ]
         if any(pd.isna(v) for v in fields):
             return (np.nan, "Unknown")
-        if float(total_assets) <= 0 or float(total_liab) <= 0:
+        total_assets_f = _require_real(total_assets, "TotalAssets")
+        total_liab_f = _require_real(
+            total_liab, "TotalLiabilitiesNetMinorityInterest"
+        )
+        working_capital_f = _require_real(working_capital, "WorkingCapital")
+        retained_earnings_f = _require_real(retained_earnings, "RetainedEarnings")
+        ebit_f = _require_real(ebit, "EBIT")
+        revenue_f = _require_real(revenue, "TotalRevenue")
+        shares_f = _require_real(shares, "OrdinarySharesNumber")
+
+        if total_assets_f <= 0 or total_liab_f <= 0:
             return (np.nan, "Unknown")
         if pd.isna(current_price) or current_price <= 0:
             return (np.nan, "Unknown")
 
-        market_cap = float(current_price) * float(shares)
+        market_cap = float(current_price) * shares_f
         z_score = (
-            1.2 * (float(working_capital) / float(total_assets))
-            + 1.4 * (float(retained_earnings) / float(total_assets))
-            + 3.3 * (float(ebit) / float(total_assets))
-            + 0.6 * (market_cap / float(total_liab))
-            + 1.0 * (float(revenue) / float(total_assets))
+            1.2 * (working_capital_f / total_assets_f)
+            + 1.4 * (retained_earnings_f / total_assets_f)
+            + 3.3 * (ebit_f / total_assets_f)
+            + 0.6 * (market_cap / total_liab_f)
+            + 1.0 * (revenue_f / total_assets_f)
         )
         if z_score < 1.81:
             bucket = "DISTRESS (Risk)"
@@ -1879,20 +1915,26 @@ class VectorBacktester:
             trough_idx = -1
             trough_dd = 0.0
 
-            for idx, row in grp.iterrows():
+            for idx_i in range(len(grp)):
+                row = grp.iloc[idx_i]
                 dd = float(row["drawdown"]) if pd.notna(row["drawdown"]) else 0.0
                 if not in_event and dd <= threshold:
                     in_event = True
-                    start_idx = idx
-                    trough_idx = idx
+                    start_idx = idx_i
+                    trough_idx = idx_i
                     trough_dd = dd
                 if in_event and dd < trough_dd:
                     trough_dd = dd
-                    trough_idx = idx
+                    trough_idx = idx_i
                 if in_event and dd > threshold:
                     start_row = grp.iloc[start_idx]
                     trough_row = grp.iloc[trough_idx]
                     recovery_date = row["period_end"]
+                    end_date = (
+                        grp.iloc[idx_i - 1]["period_end"]
+                        if idx_i > 0
+                        else row["period_end"]
+                    )
                     events.append(
                         {
                             "track": track,
@@ -1901,9 +1943,9 @@ class VectorBacktester:
                             "regime_at_start": start_row["regime"],
                             "trough_date": trough_row["period_end"],
                             "min_drawdown": trough_dd,
-                            "end_date": grp.iloc[idx - 1]["period_end"] if idx > 0 else row["period_end"],
+                            "end_date": end_date,
                             "recovery_date": recovery_date,
-                            "duration_periods": int(idx - start_idx),
+                            "duration_periods": int(idx_i - start_idx),
                         }
                     )
                     in_event = False

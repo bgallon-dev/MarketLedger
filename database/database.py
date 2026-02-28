@@ -295,7 +295,7 @@ def get_ticker_history(symbol, start_date=None, end_date=None):
 
     query += " ORDER BY h.date"
 
-    df = pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(query, conn, params=tuple(params))
     conn.close()
     return df
 
@@ -355,7 +355,7 @@ def get_ticker_history_bulk(symbols, start_date=None, end_date=None) -> pd.DataF
                 query += " AND h.date <= ?"
                 params.append(end_date)
             query += " ORDER BY t.symbol, h.date"
-            frames.append(pd.read_sql_query(query, conn, params=params))
+            frames.append(pd.read_sql_query(query, conn, params=tuple(params)))
     finally:
         conn.close()
 
@@ -426,7 +426,7 @@ def get_financial_data_bulk(
                 query += f" AND f.metric IN ({metric_placeholders})"
                 params.extend(metric_values)
             query += " ORDER BY t.symbol, f.metric, f.period"
-            frames.append(pd.read_sql_query(query, conn, params=params))
+            frames.append(pd.read_sql_query(query, conn, params=tuple(params)))
     finally:
         conn.close()
 

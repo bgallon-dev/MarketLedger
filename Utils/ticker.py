@@ -9,7 +9,7 @@ This module provides a modular, reusable interface for:
 
 Usage:
 ------
-    from pyfinancial.Utils.ticker import TickerManager
+    from Utils.ticker import TickerManager
 
     # Initialize with default settings
     tm = TickerManager()

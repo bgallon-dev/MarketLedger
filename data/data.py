@@ -11,7 +11,7 @@ SCRIPT_DIR = Path(__file__).parent
 PACKAGE_DIR = SCRIPT_DIR.parent
 DEFAULT_EXCHANGE = "CUSTOM"
 
-from pyfinancial.database.database import init_database, save_financial_data
+from database.database import init_database, save_financial_data
 
 
 warnings.filterwarnings(
@@ -159,7 +159,7 @@ def fetch_data_from_file(
     if ticker_path.is_absolute():
         txt_file = ticker_path
     else:
-        # Primary path: relative to package root (pyfinancial/Utils/*.txt)
+        # Primary path: relative to project root (Utils/*.txt)
         package_relative = PACKAGE_DIR / ticker_path
         # Backward-compatible fallback: relative to this module dir
         data_relative = SCRIPT_DIR / ticker_path

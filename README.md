@@ -1,6 +1,6 @@
-# Yahoo Project (`pyfinancial`) Operator Runbook
+# Yahoo Project (`MarketLedger`) Operator Runbook
 
-`pyfinancial` is a local-first quantitative equity research pipeline that uses Yahoo Finance as the upstream source and SQLite as the local system of record. It is built to let operators run repeatable ingestion, screening, forensic filtering, valuation, risk-vector gating, and export workflows from the command line.
+`MarketLedger` is a local-first quantitative equity research pipeline that uses Yahoo Finance as the upstream source and SQLite as the local system of record. It is built to let operators run repeatable ingestion, screening, forensic filtering, valuation, risk-vector gating, and export workflows from the command line.
 
 ## Table of Contents
 
@@ -29,8 +29,8 @@ Why this matters: this is the fastest path from empty environment to a real outp
 
 ```powershell
 py -m pip install pandas numpy scipy yfinance tqdm pytest jinja2
-py -m pyfinancial.data.data AAPL MSFT GOOGL --exchange CUSTOM
-py -m pyfinancial.main --output .\buy_list_with_projections.csv
+py -m data.data AAPL MSFT GOOGL --exchange CUSTOM
+py -m main --output .\buy_list_with_projections.csv
 ```
 
 Then inspect:
@@ -48,17 +48,17 @@ Why this matters: these visuals show how modules connect and how the DAG execute
 ```mermaid
 flowchart LR
     YF["Yahoo Finance API (yfinance)"]
-    DBFILE["SQLite DB<br/>pyfinancial/database/financial_data.db"]
+    DBFILE["SQLite DB<br/>database/financial_data.db"]
 
-    MAIN["pyfinancial/main.py<br/>run_pipeline()"]
+    MAIN["main.py<br/>run_pipeline()"]
 
-    DATA["pyfinancial/data/data.py<br/>run_data_fetch()"]
-    STRAT["pyfinancial/strat/strat.py<br/>StrategyEngine + Portfolio"]
-    FORENSIC["pyfinancial/forensic/forensic_scan.py<br/>run_forensic_scan()"]
-    VAL["pyfinancial/valuation/valuation_projector.py<br/>run_valuation_scan()"]
-    DISTRO["pyfinancial/distro/distributions.py<br/>KumaraswamyLaplace"]
-    RISK["pyfinancial/risk/risk_vector.py<br/>attach_risk_vectors() + gating"]
-    DBMOD["pyfinancial/database/database.py<br/>read/write + bulk prefetch"]
+    DATA["data/data.py<br/>run_data_fetch()"]
+    STRAT["strat/strat.py<br/>StrategyEngine + Portfolio"]
+    FORENSIC["forensic/forensic_scan.py<br/>run_forensic_scan()"]
+    VAL["valuation/valuation_projector.py<br/>run_valuation_scan()"]
+    DISTRO["distro/distributions.py<br/>KumaraswamyLaplace"]
+    RISK["risk/risk_vector.py<br/>attach_risk_vectors() + gating"]
+    DBMOD["database/database.py<br/>read/write + bulk prefetch"]
 
     CSV["buy_list_with_projections.csv"]
     HTML["buy_list_with_projections.html"]
@@ -130,7 +130,7 @@ Why this matters: this README is optimized for operational execution, not theory
 Why this matters: most runtime issues come from missing environment assumptions.
 
 - Python: `3.11` tested in this workspace.
-- Shell examples: PowerShell from repository root (`c:\Users\Benjamin\Documents\Yahoo_project`).
+- Shell examples: PowerShell from repository root (`c:\Users\Benjamin\Documents\Yahoo_project\MarketLedger`).
 - Network: required for Yahoo Finance data fetches.
 - Disk: SQLite data can grow into multiple GB depending on universe/history depth.
 
@@ -154,8 +154,8 @@ Why this matters: different operating goals need different command paths.
 ### Workflow A: First Run with a Few Symbols
 
 ```powershell
-py -m pyfinancial.data.data AAPL MSFT GOOGL --exchange CUSTOM
-py -m pyfinancial.main --output .\buy_list_small.csv
+py -m data.data AAPL MSFT GOOGL --exchange CUSTOM
+py -m main --output .\buy_list_small.csv
 ```
 
 Use this to validate local setup quickly.
@@ -163,19 +163,19 @@ Use this to validate local setup quickly.
 ### Workflow B: Full-Universe Cached Run (Default NYSE Seed)
 
 ```powershell
-py -m pyfinancial.data.data
-py -m pyfinancial.main
+py -m data.data
+py -m main
 ```
 
 Behavior:
 
-- First command initializes DB and fetches tickers from `pyfinancial/Utils/nyse_tickers.txt`.
+- First command initializes DB and fetches tickers from `Utils/nyse_tickers.txt`.
 - Second command runs the full pipeline using cached local data by default.
 
 ### Workflow C: Refresh + Strict Validation
 
 ```powershell
-py -m pyfinancial.main --update --strict --max-workers 4
+py -m main --update --strict --max-workers 4
 ```
 
 Use this for higher-integrity runs when schema/data contract violations should fail fast.
@@ -187,34 +187,34 @@ Why this matters: ingestion determines all downstream data quality and coverage.
 CLI entrypoint:
 
 ```powershell
-py -m pyfinancial.data.data [tickers...] [--exchange EXCHANGE]
+py -m data.data [tickers...] [--exchange EXCHANGE]
 ```
 
 ### Arguments
 
 | Argument | Effect | Example |
 | --- | --- | --- |
-| `tickers` (positional, optional) | Fetch only specified symbols. | `py -m pyfinancial.data.data AAPL MSFT` |
-| `--exchange` | Sets exchange label saved with symbols (default `CUSTOM` when tickers are specified). | `py -m pyfinancial.data.data AAPL --exchange NASDAQ` |
-| `--TICKER` style unknown flags | Also parsed as tickers via `parse_known_args()` fallback. | `py -m pyfinancial.data.data --AAPL --MSFT` |
+| `tickers` (positional, optional) | Fetch only specified symbols. | `py -m data.data AAPL MSFT` |
+| `--exchange` | Sets exchange label saved with symbols (default `CUSTOM` when tickers are specified). | `py -m data.data AAPL --exchange NASDAQ` |
+| `--TICKER` style unknown flags | Also parsed as tickers via `parse_known_args()` fallback. | `py -m data.data --AAPL --MSFT` |
 
 ### Default behavior with no tickers
 
 If no tickers are provided, ingestion calls `fetch_nyse_data()` and reads:
 
-- `pyfinancial/Utils/nyse_tickers.txt`
+- `Utils/nyse_tickers.txt`
 
 Related helper files:
 
-- `pyfinancial/Utils/sp500_tickers.txt`
-- `pyfinancial/Utils/nasdaq_tickers.txt`
+- `Utils/sp500_tickers.txt`
+- `Utils/nasdaq_tickers.txt`
 
 ### Optional Python helper path
 
 If you want to seed from a specific packaged file helper:
 
 ```powershell
-py -c "from pyfinancial.data.data import fetch_sp500_data; fetch_sp500_data(verbose=True)"
+py -c "from data.data import fetch_sp500_data; fetch_sp500_data(verbose=True)"
 ```
 
 ## Command Reference: Main Pipeline
@@ -224,7 +224,7 @@ Why this matters: this is the production operator interface for screening and ex
 CLI entrypoint:
 
 ```powershell
-py -m pyfinancial.main [flags]
+py -m main [flags]
 ```
 
 ### Flags
@@ -250,19 +250,19 @@ py -m pyfinancial.main [flags]
 `fast-debug`:
 
 ```powershell
-py -m pyfinancial.main --no-parallel --no-bulk-prefetch --no-tail-cache --max-workers 1
+py -m main --no-parallel --no-bulk-prefetch --no-tail-cache --max-workers 1
 ```
 
 `full-analysis`:
 
 ```powershell
-py -m pyfinancial.main --update --strict --max-workers 4
+py -m main --update --strict --max-workers 4
 ```
 
 `quiet-batch`:
 
 ```powershell
-py -m pyfinancial.main --quiet --output .\runs\run_2026_02_27.csv
+py -m main --quiet --output .\runs\run_2026_02_27.csv
 ```
 
 Note: create directories such as `.\runs\` before using them.
@@ -390,7 +390,7 @@ Why this matters: the SQLite store is the operational backbone for all runs.
 
 Primary DB file:
 
-- `pyfinancial/database/financial_data.db`
+- `database/financial_data.db`
 
 Core tables:
 
@@ -405,17 +405,17 @@ Core tables:
 Helpful inspection commands:
 
 ```powershell
-py -m pyfinancial.database.database stats
-py -m pyfinancial.database.database history AAPL
-py -m pyfinancial.database.database summary AAPL
-py -m pyfinancial.database.database search AAP
-py -m pyfinancial.database.database metrics income_statement
+py -m database.database stats
+py -m database.database history AAPL
+py -m database.database summary AAPL
+py -m database.database search AAP
+py -m database.database metrics income_statement
 ```
 
 Interactive mode:
 
 ```powershell
-py -m pyfinancial.database.database interactive
+py -m database.database interactive
 ```
 
 ## Backtesting and Research Queries
@@ -425,7 +425,7 @@ Why this matters: research-mode outputs let you analyze stability and failure mo
 ### Run a query-ready research backtest
 
 ```python
-from pyfinancial.Utils.backtester import VectorBacktester
+from Utils.backtester import VectorBacktester
 
 bt = VectorBacktester(reporting_lag_days=90)
 bt.load_data()
@@ -498,13 +498,13 @@ py -m pip install pandas numpy scipy yfinance tqdm pytest jinja2
 
 ### Pipeline exits with code `1` and no picks
 
-Symptom: `py -m pyfinancial.main` exits non-zero.
+Symptom: `py -m main` exits non-zero.
 
 Cause: pipeline returns an empty selected portfolio (expected behavior in current CLI exit logic).
 
 Checks:
 
-- confirm DB has data (`py -m pyfinancial.database.database stats`)
+- confirm DB has data (`py -m database.database stats`)
 - rerun with `--update` to refresh
 - rerun with `--no-momentum` to inspect whether momentum gating is too restrictive
 
@@ -515,13 +515,13 @@ Symptom: very few candidates or stale outcomes.
 Fix:
 
 ```powershell
-py -m pyfinancial.main --update
+py -m main --update
 ```
 
 Or reseed:
 
 ```powershell
-py -m pyfinancial.data.data
+py -m data.data
 ```
 
 ### Slow runtime or SQLite contention
@@ -577,7 +577,7 @@ It suppresses rejected assets in decision-log export intent (`include_rejected=F
 Use:
 
 ```powershell
-py -m pyfinancial.main --no-momentum
+py -m main --no-momentum
 ```
 
 ### 5) Can I run only a few tickers for quick checks?
@@ -585,8 +585,8 @@ py -m pyfinancial.main --no-momentum
 Yes:
 
 ```powershell
-py -m pyfinancial.data.data AAPL MSFT GOOGL --exchange CUSTOM
-py -m pyfinancial.main --exchange CUSTOM
+py -m data.data AAPL MSFT GOOGL --exchange CUSTOM
+py -m main --exchange CUSTOM
 ```
 
 ### 6) How do I inspect what data is in SQLite?
@@ -594,13 +594,13 @@ py -m pyfinancial.main --exchange CUSTOM
 Use:
 
 ```powershell
-py -m pyfinancial.database.database stats
-py -m pyfinancial.database.database history AAPL
+py -m database.database stats
+py -m database.database history AAPL
 ```
 
 ### 7) Where do `RV_*` columns come from?
 
-They are flattened from the `RiskVector` model in `pyfinancial/risk/risk_vector.py` during `risk_vector_node`.
+They are flattened from the `RiskVector` model in `risk/risk_vector.py` during `risk_vector_node`.
 
 ### 8) Why do I get `Needs Review` as `Investment Signal`?
 
@@ -612,3 +612,4 @@ Why this matters: operator docs need a lightweight change record as flags/contra
 
 - `README v2` (current): expanded operator-first runbook, full CLI references, output contracts, and troubleshooting.
 - Next update: add explicit dated entries when CLI flags, output schemas, or run profiles change.
+

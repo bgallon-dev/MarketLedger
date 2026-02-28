@@ -205,29 +205,27 @@ def get_contract_info(contract_name: Optional[str] = None) -> Dict[str, Any]:
     return DATA_CONTRACTS
 
 
-# Ensure pyfinancial is in path
+# Project path helpers
 SCRIPT_DIR = Path(__file__).parent
 ROOT_DIR = SCRIPT_DIR.parent
-sys.path.insert(0, str(SCRIPT_DIR))
-sys.path.insert(0, str(ROOT_DIR))
 
 # Import pipeline modules
-import pyfinancial.data.data as data
-import pyfinancial.strat.strat as strat
-from pyfinancial.strat.strat import StrategyEngine, Portfolio, MomentumFilter
-from pyfinancial.database.database import (
+import data.data as data
+import strat.strat as strat
+from strat.strat import StrategyEngine, Portfolio, MomentumFilter
+from database.database import (
     get_ticker_history,
     get_ticker_history_bulk,
     get_financial_data_bulk,
 )
 
-# Import analysis modules from parent directory
-sys.path.insert(0, str(ROOT_DIR))
 from forensic.forensic_scan import run_forensic_scan
 from valuation.valuation_projector import (
+    calculate_model_confidence,
+    classify_investment_signal,
     run_valuation_scan,
 )
-from pyfinancial.risk.risk_vector import (
+from risk.risk_vector import (
     RiskVectorConfig,
     attach_risk_vectors,
     build_risk_vector,
@@ -946,11 +944,16 @@ def _build_strategy_decisions(
             columns=["Ticker", "Strategy", "Decision", "DecisionStage", "RejectedReason"]
         )
 
-    decision_records: Dict[str, Dict[str, Any]] = {
-        row["Ticker"]: row.to_dict() for _, row in momentum_reject_df.iterrows()
-    }
+    decision_records: Dict[str, Dict[str, Any]] = {}
+    for _, row in momentum_reject_df.iterrows():
+        ticker = str(row["Ticker"])
+        row_dict: Dict[str, Any] = {str(col): row[col] for col in row.index}
+        decision_records[ticker] = row_dict
+
     for _, row in selected_df.iterrows():
-        decision_records[row["Ticker"]] = row.to_dict()
+        ticker = str(row["Ticker"])
+        row_dict: Dict[str, Any] = {str(col): row[col] for col in row.index}
+        decision_records[ticker] = row_dict
 
     decision_seed_df = pd.DataFrame(list(decision_records.values()))
     if decision_seed_df.empty:
@@ -1008,8 +1011,9 @@ def _history_map_from_bulk(df: Optional[pd.DataFrame]) -> Dict[str, pd.DataFrame
     work = df.copy()
     work["symbol"] = work["symbol"].astype(str).str.upper()
     for symbol, grp in work.groupby("symbol", sort=False):
+        symbol_key = str(symbol)
         cols = [c for c in grp.columns if c != "symbol"]
-        out[symbol] = grp[cols].sort_values("date").reset_index(drop=True)
+        out[symbol_key] = grp[cols].sort_values("date").reset_index(drop=True)
     return out
 
 
@@ -1020,7 +1024,8 @@ def _financial_map_from_bulk(df: Optional[pd.DataFrame]) -> Dict[str, pd.DataFra
     work = df.copy()
     work["symbol"] = work["symbol"].astype(str).str.upper()
     for symbol, grp in work.groupby("symbol", sort=False):
-        out[symbol] = grp.pivot(index="metric", columns="period", values="value")
+        symbol_key = str(symbol)
+        out[symbol_key] = grp.pivot(index="metric", columns="period", values="value")
     return out
 
 

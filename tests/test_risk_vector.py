@@ -1,6 +1,6 @@
 import pandas as pd
 
-from pyfinancial.risk.risk_vector import (
+from risk.risk_vector import (
     RiskVectorConfig,
     attach_risk_vectors,
     build_risk_vector,
@@ -73,4 +73,3 @@ def test_attach_risk_vectors_adds_rv_columns_and_signal():
     assert "RV_Gate_Count" in out.columns
     assert out.loc[0, "RV_Gate_Count"] == 0
     assert out.loc[0, "Investment Signal"] in {"Strong Buy", "Speculative Buy", "Hold"}
-

@@ -453,6 +453,41 @@ py -m database.database interactive
 
 Why this matters: research-mode outputs let you analyze stability and failure modes, not just single-run picks.
 
+### Backtester strategy profiles (JSON)
+
+`VectorBacktester` now supports profile-driven strategy and universe settings from:
+
+- `Utils/backtester_config.json`
+
+Profile usage patterns:
+
+```python
+from Utils.backtester import VectorBacktester
+
+# Built-in defaults (matches prior behavior)
+bt = VectorBacktester(reporting_lag_days=90)
+
+# Load profile from JSON at construction time
+bt_large = VectorBacktester(
+    reporting_lag_days=90,
+    profile_name="large_cap",
+    config_path="Utils/backtester_config.json",
+)
+
+# One-off override for a single call (does not mutate active profile)
+result = bt.run_backtest(
+    start_date="2024-01-01",
+    end_date="2024-06-01",
+    strategy="moat",
+    profile_name="large_cap",
+    config_path="Utils/backtester_config.json",
+)
+```
+
+Fail-fast behavior:
+
+- Missing/invalid JSON, unknown profile names, unknown keys, invalid value types/ranges, and invalid contender strategy names raise `ValueError`.
+
 ### Run a query-ready research backtest
 
 ```python

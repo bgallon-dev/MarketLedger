@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "profiles": {
+    "default": {
+      "universe": {
+        "strategy_min_market_cap_mm": 250,
+        "direct_filter_default_min_market_cap_mm": 200,
+        "revenue_proxy_multiplier": 0.5,
+        "warrant_regex": "^[A-Z]{4}[WRU]$"
+      },
+      "execution": {
+        "default_top_n": 10,
+        "combo_top_n_per_strategy": 5,
+        "magic_gate_top_n": 10
+      },
+      "strategies": {
+        "magic_formula": {},
+        "moat": {
+          "min_total_revenue": 100000000
+        },
+        "fcf_yield": {
+          "require_positive_fcf": true
+        },
+        "quality": {
+          "min_roic": 0.05,
+          "max_roic": 1.0
+        },
+        "diamonds_in_dirt": {
+          "gross_margin_min": 0.4,
+          "op_margin_min": 0.15,
+          "roe_min": 0.15,
+          "debt_to_revenue_max": 3.0,
+          "require_positive_earnings_yield": true
+        },
+        "cannibal": {
+          "min_buyback_pct": 0.03,
+          "require_positive_fcf": true,
+          "min_market_cap_mm": 200
+        },
+        "piotroski_f_score": {
+          "min_f_score": 7
+        },
+        "rule_of_40": {
+          "min_r40_score": 40,
+          "min_total_revenue": 50000000
+        }
+      },
+      "tournament": {
+        "magic_gate_top_n": 10,
+        "contenders": [
+          {
+            "name": "Pure Magic Formula",
+            "strategies": [
+              "magic_formula"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Pure Moat",
+            "strategies": [
+              "moat"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Pure Diamonds",
+            "strategies": [
+              "diamonds_in_dirt"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Pure FCF Yield",
+            "strategies": [
+              "fcf_yield"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Pure Quality",
+            "strategies": [
+              "quality"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Pure Cannibal",
+            "strategies": [
+              "cannibal"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Pure Piotroski F-Score",
+            "strategies": [
+              "piotroski_f_score"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Pure Rule of 40",
+            "strategies": [
+              "rule_of_40"
+            ],
+            "n": 10
+          },
+          {
+            "name": "Fortress (Moat + Diamond)",
+            "strategies": [
+              "moat",
+              "diamonds_in_dirt"
+            ],
+            "n": 5
+          },
+          {
+            "name": "Greenblatt+ (Magic + Moat)",
+            "strategies": [
+              "magic_formula",
+              "moat"
+            ],
+            "n": 5
+          },
+          {
+            "name": "Deep Value (Magic + Diamond)",
+            "strategies": [
+              "magic_formula",
+              "diamonds_in_dirt"
+            ],
+            "n": 5
+          },
+          {
+            "name": "Cash Cow (FCF + Cannibal)",
+            "strategies": [
+              "fcf_yield",
+              "cannibal"
+            ],
+            "n": 5
+          },
+          {
+            "name": "Growth Quality (R40 + Piotroski)",
+            "strategies": [
+              "rule_of_40",
+              "piotroski_f_score"
+            ],
+            "n": 5
+          }
+        ]
+      }
+    },
+    "large_cap": {
+      "universe": {
+        "strategy_min_market_cap_mm": 2000,
+        "direct_filter_default_min_market_cap_mm": 1500
+      },
+      "execution": {
+        "default_top_n": 8,
+        "combo_top_n_per_strategy": 4,
+        "magic_gate_top_n": 8
+      },
+      "strategies": {
+        "moat": {
+          "min_total_revenue": 500000000
+        },
+        "cannibal": {
+          "min_market_cap_mm": 1500
+        },
+        "rule_of_40": {
+          "min_r40_score": 45
+        }
+      },
+      "tournament": {
+        "magic_gate_top_n": 8
+      }
+    }
+  }
+}

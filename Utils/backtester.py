@@ -4178,6 +4178,207 @@ def _default_tournament_contenders() -> List[Dict[str, Any]]:
     return deepcopy(DEFAULT_TOURNAMENT_CONTENDERS)
 
 
+def detect_current_regime(
+    research_dir: str = "research_outputs",
+    lookback_days: int = 365,
+) -> Optional[Dict[str, Any]]:
+    """Classify the current market regime from trailing proxy price data.
+
+    Mirrors the yearly regime classification in run_regime_tournament() but
+    applies it to the most recent trailing window (default: 12 months).
+
+    Thresholds are derived from the historical distribution stored in
+    research_outputs/regime_labels.csv, so the backtester must be run first.
+
+    Returns a dict with:
+        Market_Regime   : "Neutral", "Risk-off", or "Bull growth"
+        Value_Rotation  : bool
+        Rate_Regime     : "Low rate", "Mid rate", or "High rate"
+        buckets         : list[str] — matching bucket names from regime_winners.csv
+        regime_label    : str — human-readable summary
+        spy_return      : float | None
+        iwd_return      : float | None
+        iwf_return      : float | None
+        irx_mean_annual : float | None
+
+    Returns None if proxy data or regime_labels.csv is unavailable.
+    """
+    labels_path = Path(research_dir) / "regime_labels.csv"
+    if not labels_path.exists():
+        return None
+
+    try:
+        labels_df = pd.read_csv(labels_path)
+        labels_df.columns = [c.strip() for c in labels_df.columns]
+    except Exception:
+        return None
+
+    def _normalize_rate(value: float) -> float:
+        abs_v = abs(value)
+        if abs_v >= 20.0:
+            return value / 1000.0
+        if abs_v >= 1.0:
+            return value / 100.0
+        return value
+
+    # Fetch trailing proxy prices
+    end_dt = datetime.now()
+    start_dt = end_dt - timedelta(days=lookback_days + 30)
+    start_str = start_dt.strftime("%Y-%m-%d")
+    end_str = end_dt.strftime("%Y-%m-%d")
+
+    # Try proxy candidates in priority order (same as DEFAULT_PROXY_SYMBOLS)
+    proxy_candidates = {
+        "SPY": ["SPY"],
+        "value": list(DEFAULT_VALUE_PROXY_CANDIDATES),
+        "growth_style": list(DEFAULT_GROWTH_PROXY_CANDIDATES),
+        "rate": list(DEFAULT_RATE_PROXY_CANDIDATES),
+    }
+    all_symbols: List[str] = []
+    for candidates in proxy_candidates.values():
+        all_symbols.extend(candidates)
+
+    try:
+        price_data = query_database(
+            """
+            SELECT t.symbol, h.date, h.close
+            FROM history h
+            JOIN tickers t ON h.ticker_id = t.id
+            WHERE t.symbol IN ({placeholders})
+              AND h.date >= ? AND h.date <= ?
+            ORDER BY h.date
+            """.replace(
+                "{placeholders}", ",".join(["?"] * len(all_symbols))
+            ),
+            tuple(all_symbols) + (start_str, end_str),
+        )
+    except Exception:
+        return None
+
+    if price_data.empty:
+        return None
+
+    price_data["date"] = pd.to_datetime(price_data["date"], utc=True).dt.tz_localize(None)
+    price_matrix = price_data.pivot_table(
+        index="date", columns="symbol", values="close", aggfunc="last"
+    ).sort_index()
+
+    def _period_return(symbol: str) -> Optional[float]:
+        if symbol not in price_matrix.columns:
+            return None
+        series = price_matrix[symbol].dropna()
+        if len(series) < 10:
+            return None
+        start_price = float(series.iloc[0])
+        end_price = float(series.iloc[-1])
+        if start_price == 0:
+            return None
+        return (end_price - start_price) / start_price
+
+    def _first_return(candidates: List[str]) -> Optional[float]:
+        for sym in candidates:
+            r = _period_return(sym)
+            if r is not None:
+                return r
+        return None
+
+    spy_return = _period_return("SPY")
+    iwd_return = _first_return(proxy_candidates["value"])
+    iwf_return = _first_return(proxy_candidates["growth_style"])
+
+    irx_mean_annual: Optional[float] = None
+    for rate_sym in proxy_candidates["rate"]:
+        if rate_sym in price_matrix.columns:
+            series = price_matrix[rate_sym].dropna()
+            if not series.empty:
+                irx_mean_annual = _normalize_rate(float(series.mean()))
+                break
+
+    if spy_return is None:
+        return None
+
+    growth_minus_value = (
+        iwf_return - iwd_return
+        if iwf_return is not None and iwd_return is not None
+        else None
+    )
+    value_minus_growth = (
+        iwd_return - iwf_return
+        if iwf_return is not None and iwd_return is not None
+        else None
+    )
+
+    # Derive thresholds from historical data in regime_labels.csv
+    def _q(col: str, q: float) -> Optional[float]:
+        if col not in labels_df.columns:
+            return None
+        values = pd.to_numeric(labels_df[col], errors="coerce").dropna()
+        return float(values.quantile(q)) if not values.empty else None
+
+    q_low, q_high = 0.33, 0.67
+    spy_q_low = _q("spy_return", q_low)
+    spy_q_high = _q("spy_return", q_high)
+    growth_q_high = _q("growth_minus_value", q_high)
+    value_q_high = _q("value_minus_growth", q_high)
+    irx_q_low = _q("irx_mean_annual", q_low)
+    irx_q_high = _q("irx_mean_annual", q_high)
+
+    # Classify Market_Regime
+    market_regime = "Neutral"
+    if spy_q_low is not None and spy_return <= spy_q_low:
+        market_regime = "Risk-off"
+    elif (
+        spy_q_high is not None
+        and growth_q_high is not None
+        and growth_minus_value is not None
+        and spy_return >= spy_q_high
+        and growth_minus_value >= growth_q_high
+    ):
+        market_regime = "Bull growth"
+
+    # Classify Value_Rotation
+    value_rotation = bool(
+        value_q_high is not None
+        and value_minus_growth is not None
+        and value_minus_growth >= value_q_high
+    )
+
+    # Classify Rate_Regime
+    rate_regime = "Mid rate"
+    if irx_mean_annual is not None and irx_q_high is not None and irx_mean_annual >= irx_q_high:
+        rate_regime = "High rate"
+    elif irx_mean_annual is not None and irx_q_low is not None and irx_mean_annual <= irx_q_low:
+        rate_regime = "Low rate"
+
+    # Map to bucket names matching regime_winners.csv
+    buckets: List[str] = []
+    if market_regime == "Risk-off":
+        buckets.append("Risk-off")
+    if market_regime == "Bull growth":
+        buckets.append("Bull growth")
+    if value_rotation:
+        buckets.append("Value rotation")
+    if rate_regime in ("High rate", "Low rate"):
+        buckets.append(rate_regime)
+
+    parts = [market_regime, rate_regime]
+    if value_rotation:
+        parts.append("Value rotation")
+    regime_label = " / ".join(parts)
+
+    return {
+        "Market_Regime": market_regime,
+        "Value_Rotation": value_rotation,
+        "Rate_Regime": rate_regime,
+        "buckets": buckets,
+        "regime_label": regime_label,
+        "spy_return": spy_return,
+        "iwd_return": iwd_return,
+        "iwf_return": iwf_return,
+        "irx_mean_annual": irx_mean_annual,
+    }
+
+
 def run_strategy_tournament(
     show_progress: bool = True,
     verbose_combo: bool = False,

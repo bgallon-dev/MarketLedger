@@ -318,6 +318,178 @@ class QualityStrategy(BaseStrategy):
         return df.nsmallest(top_n, "Quality_Rank").index.tolist()
 
 
+class PiotroskiStrategy(BaseStrategy):
+    """
+    Piotroski F-Score: 9-point financial health scoring system.
+
+    Criteria are grouped into three pillars:
+    - Profitability (4 signals): ROA, OCF, delta ROA, accruals
+    - Leverage/Liquidity (3 signals): delta debt, delta current ratio, share dilution
+    - Operating Efficiency (2 signals): delta gross margin, delta asset turnover
+
+    YoY comparisons use _Prev columns from the snapshot when available;
+    criteria requiring missing columns are silently skipped.
+    """
+
+    name = "piotroski_f_score"
+    description = "Piotroski F-Score (Financial Health & Efficiency)"
+    required_metrics = [
+        "NetIncome",
+        "OperatingCashFlow",
+        "TotalAssets",
+        "GrossProfit",
+        "TotalRevenue",
+        "OrdinarySharesNumber",
+    ]
+
+    def __init__(self, min_f_score: int = 7):
+        self.min_f_score = min_f_score
+
+    def screen(self, df: pd.DataFrame, top_n: int = 10) -> List[str]:
+        df = self.prepare_data(df)
+        df["F_Score"] = 0
+
+        # --- Profitability ---
+        if "NetIncome" in df.columns:
+            df.loc[df["NetIncome"] > 0, "F_Score"] += 1
+        if "OperatingCashFlow" in df.columns:
+            df.loc[df["OperatingCashFlow"] > 0, "F_Score"] += 1
+        if all(
+            c in df.columns
+            for c in ["NetIncome", "TotalAssets", "NetIncome_Prev", "TotalAssets_Prev"]
+        ):
+            df["ROA"] = df["NetIncome"] / df["TotalAssets"].replace(0, np.nan)
+            df["ROA_Prev"] = df["NetIncome_Prev"] / df["TotalAssets_Prev"].replace(
+                0, np.nan
+            )
+            df.loc[df["ROA"] > df["ROA_Prev"], "F_Score"] += 1
+        if all(c in df.columns for c in ["OperatingCashFlow", "NetIncome"]):
+            df.loc[df["OperatingCashFlow"] > df["NetIncome"], "F_Score"] += 1
+
+        # --- Leverage / Liquidity ---
+        if all(c in df.columns for c in ["TotalDebt", "TotalDebt_Prev"]):
+            df.loc[df["TotalDebt"] <= df["TotalDebt_Prev"], "F_Score"] += 1
+        if all(
+            c in df.columns
+            for c in [
+                "CurrentAssets",
+                "CurrentLiabilities",
+                "CurrentAssets_Prev",
+                "CurrentLiabilities_Prev",
+            ]
+        ):
+            df["Current_Ratio"] = df["CurrentAssets"] / df["CurrentLiabilities"].replace(
+                0, np.nan
+            )
+            df["Current_Ratio_Prev"] = df["CurrentAssets_Prev"] / df[
+                "CurrentLiabilities_Prev"
+            ].replace(0, np.nan)
+            df.loc[df["Current_Ratio"] > df["Current_Ratio_Prev"], "F_Score"] += 1
+        if all(c in df.columns for c in ["OrdinarySharesNumber", "OrdinarySharesNumber_Prev"]):
+            df.loc[
+                df["OrdinarySharesNumber"] <= df["OrdinarySharesNumber_Prev"], "F_Score"
+            ] += 1
+
+        # --- Operating Efficiency ---
+        if all(
+            c in df.columns
+            for c in ["GrossProfit", "TotalRevenue", "GrossProfit_Prev", "TotalRevenue_Prev"]
+        ):
+            df["Gross_Margin"] = df["GrossProfit"] / df["TotalRevenue"].replace(0, np.nan)
+            df["Gross_Margin_Prev"] = df["GrossProfit_Prev"] / df["TotalRevenue_Prev"].replace(
+                0, np.nan
+            )
+            df.loc[df["Gross_Margin"] > df["Gross_Margin_Prev"], "F_Score"] += 1
+        if all(
+            c in df.columns
+            for c in ["TotalRevenue", "TotalAssets", "TotalRevenue_Prev", "TotalAssets_Prev"]
+        ):
+            df["Asset_Turnover"] = df["TotalRevenue"] / df["TotalAssets"].replace(0, np.nan)
+            df["Asset_Turnover_Prev"] = df["TotalRevenue_Prev"] / df[
+                "TotalAssets_Prev"
+            ].replace(0, np.nan)
+            df.loc[df["Asset_Turnover"] > df["Asset_Turnover_Prev"], "F_Score"] += 1
+
+        passed = df[df["F_Score"] >= self.min_f_score].copy()
+        if passed.empty:
+            return []
+
+        if "MarketCap" in passed.columns and "EBIT" in passed.columns:
+            passed["Earnings_Yield"] = passed["EBIT"] / (
+                passed["MarketCap"] * 1e6
+            ).replace(0, np.nan)
+            return passed.nlargest(top_n, "Earnings_Yield").index.tolist()
+        return passed.nlargest(top_n, "F_Score").index.tolist()
+
+
+class DiamondsInDirtStrategy(BaseStrategy):
+    """
+    Diamonds in Dirt: High-quality businesses screened for margin and capital efficiency.
+
+    Filters for: high gross margin, strong operating margin, healthy ROE, and
+    low financial leverage. Ranks survivors by earnings yield (operating income / EV).
+    """
+
+    name = "diamonds_in_dirt"
+    description = "Diamonds in Dirt (High Margin + ROE + Earnings Yield)"
+    required_metrics = [
+        "NetIncome",
+        "StockholdersEquity",
+        "TotalRevenue",
+        "GrossProfit",
+        "OperatingIncome",
+    ]
+
+    def __init__(
+        self,
+        gross_margin_min: float = 0.40,
+        op_margin_min: float = 0.15,
+        roe_min: float = 0.15,
+        debt_to_revenue_max: float = 3.0,
+        require_positive_earnings_yield: bool = True,
+    ):
+        self.gross_margin_min = gross_margin_min
+        self.op_margin_min = op_margin_min
+        self.roe_min = roe_min
+        self.debt_to_revenue_max = debt_to_revenue_max
+        self.require_positive_earnings_yield = require_positive_earnings_yield
+
+    def screen(self, df: pd.DataFrame, top_n: int = 10) -> List[str]:
+        df = self.prepare_data(df)
+
+        if not all(c in df.columns for c in ["TotalRevenue", "StockholdersEquity"]):
+            return []
+
+        df = df[(df["TotalRevenue"] > 0) & (df["StockholdersEquity"] > 0)].copy()
+        df["ROE"] = df["NetIncome"] / df["StockholdersEquity"]
+        df["Gross_Margin"] = df["GrossProfit"] / df["TotalRevenue"]
+        df["Op_Margin"] = df["OperatingIncome"] / df["TotalRevenue"]
+
+        mask = (
+            (df["Gross_Margin"] > self.gross_margin_min)
+            & (df["Op_Margin"] > self.op_margin_min)
+            & (df["ROE"] > self.roe_min)
+        )
+        if "TotalDebt" in df.columns:
+            df["Debt_to_Rev"] = df["TotalDebt"] / df["TotalRevenue"]
+            mask = mask & (df["Debt_to_Rev"] < self.debt_to_revenue_max)
+
+        passed = df[mask].copy()
+        if passed.empty:
+            return []
+
+        if "MarketCap" in passed.columns:
+            passed["Earnings_Yield"] = passed["OperatingIncome"] / (
+                passed["MarketCap"] * 1e6
+            ).replace(0, np.nan)
+            if self.require_positive_earnings_yield:
+                passed = passed[passed["Earnings_Yield"] > 0]
+            if passed.empty:
+                return []
+            return passed.nlargest(top_n, "Earnings_Yield").index.tolist()
+        return passed.nlargest(top_n, "ROE").index.tolist()
+
+
 # ==============================================================================
 # 3. STRATEGY REGISTRY
 # ==============================================================================
@@ -341,6 +513,8 @@ class StrategyRegistry:
         self.register(FCFYieldStrategy())
         self.register(CannibalStrategy())
         self.register(QualityStrategy())
+        self.register(PiotroskiStrategy())
+        self.register(DiamondsInDirtStrategy())
 
     def register(self, strategy: BaseStrategy) -> None:
         """Register a strategy instance."""
@@ -403,8 +577,16 @@ class DataProvider:
         "cash_flow": ["FreeCashFlow", "OperatingCashFlow"],
     }
 
-    # Metrics that need YoY comparison
-    YOY_METRICS = ["OrdinarySharesNumber", "TotalRevenue"]
+    # Metrics that need YoY comparison (used by Piotroski and other delta-based strategies)
+    YOY_METRICS = [
+        "OrdinarySharesNumber",
+        "TotalRevenue",
+        "NetIncome",
+        "GrossProfit",
+        "TotalAssets",
+        "CurrentAssets",
+        "CurrentLiabilities",
+    ]
 
     def __init__(
         self,
@@ -868,10 +1050,12 @@ class Portfolio:
     >>> portfolio.save("my_picks.csv")
     """
 
-    # Default strategy combinations
+    # Default strategy combinations (mirrors backtester tournament contenders)
     DEFAULT_COMBOS = {
         "Greenblatt+": ["magic_formula", "moat"],
         "Cash Cow": ["fcf_yield", "cannibal"],
+        "Fortress": ["moat", "diamonds_in_dirt"],
+        "Piotroski": ["piotroski_f_score"],
     }
 
     def __init__(self, engine: StrategyEngine):

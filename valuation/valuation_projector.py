@@ -718,7 +718,7 @@ def _analyze_ticker_valuation(
         )
 
         # Calculate inputs
-        hist["date"] = pd.to_datetime(hist["date"])
+        hist["date"] = pd.to_datetime(hist["date"], utc=True).dt.tz_localize(None)
         hist = hist.sort_values("date")
         current_price = hist["close"].iloc[-1]
 

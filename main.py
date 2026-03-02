@@ -231,6 +231,7 @@ from risk.risk_vector import (
     build_risk_vector,
     gate_stage_and_reason,
 )
+from Utils.backtester import detect_current_regime
 
 
 def generate_html_report(df: pd.DataFrame, filename: str = "report.html") -> None:
@@ -858,13 +859,148 @@ def _left_merge_new_columns(
     return base_df.merge(add_df[new_cols], on=key, how="left")
 
 
+# Mapping from strategy_risk_metrics.csv display names to live StrategyEngine names
+_SHARPE_METRICS_NAME_MAP: Dict[str, str] = {
+    "Pure Magic Formula": "magic_formula",
+    "Pure Moat": "moat",
+    "Pure FCF Yield": "fcf_yield",
+    "Pure Cannibal": "cannibal",
+    "Pure Quality": "quality",
+    "Pure Piotroski F-Score": "piotroski_f_score",
+    "Pure Diamonds": "diamonds_in_dirt",
+}
+
+
+def load_strategy_sharpe_weights(
+    research_dir: str = "research_outputs",
+) -> Optional[Dict[str, float]]:
+    """Load per-strategy Sharpe ratios from backtester research output.
+
+    Returns {strat_name: sharpe} or None if the file is missing/unreadable.
+    """
+    path = Path(research_dir) / "strategy_risk_metrics.csv"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+        df.columns = [c.strip() for c in df.columns]
+        df["Strategy"] = df["Strategy"].str.strip()
+        result: Dict[str, float] = {}
+        for _, row in df.iterrows():
+            mapped = _SHARPE_METRICS_NAME_MAP.get(row["Strategy"])
+            if mapped is not None:
+                result[mapped] = float(row["Sharpe"])
+        return result or None
+    except Exception:
+        return None
+
+
+def compute_sharpe_top_n(
+    sharpe_weights: Dict[str, float],
+    base_n: int = 10,
+    min_n: int = 3,
+    max_n: int = 20,
+) -> Dict[str, int]:
+    """Distribute candidate slots proportionally to positive Sharpe ratios.
+
+    Total budget = len(strategies) * base_n. Strategies with Sharpe ≤ 0 receive min_n.
+    """
+    positive = {s: max(0.0, v) for s, v in sharpe_weights.items()}
+    pos_sum = sum(positive.values())
+    if pos_sum == 0:
+        return {s: base_n for s in sharpe_weights}
+
+    n_zero = sum(1 for v in positive.values() if v == 0.0)
+    total_budget = len(sharpe_weights) * base_n
+    floored_budget = n_zero * min_n
+    remaining_budget = total_budget - floored_budget
+
+    result: Dict[str, int] = {}
+    for s, sharpe in sharpe_weights.items():
+        if positive[s] == 0.0:
+            result[s] = min_n
+        else:
+            raw = remaining_budget * (positive[s] / pos_sum)
+            result[s] = max(min_n, min(max_n, round(raw)))
+    return result
+
+
+def load_gate_recommendations(
+    research_dir: str = "research_outputs",
+) -> List[Tuple[str, float, str]]:
+    """Return gates that historically harmed returns (delta_cagr < -0.05, not publishable).
+
+    Returns list of (gate_key, delta_cagr, source_strategy_label).
+    """
+    path = Path(research_dir) / "magic_gate_comparison.csv"
+    if not path.exists():
+        return []
+    try:
+        df = pd.read_csv(path)
+        df.columns = [c.strip() for c in df.columns]
+        df["Strategy"] = df["Strategy"].str.strip()
+        results: List[Tuple[str, float, str]] = []
+        for _, row in df.iterrows():
+            strat = str(row["Strategy"])
+            if strat == "Magic (raw)":
+                continue
+            publishable = str(row.get("publishable_flag", "")).strip().lower() == "true"
+            try:
+                delta_cagr = float(row.get("delta_cagr", 0.0))
+            except (ValueError, TypeError):
+                continue
+            if not publishable and delta_cagr < -0.05:
+                # Derive a gate key: "Magic + Distress Gate" → "distress"
+                gate_key = (
+                    strat.replace("Magic + ", "")
+                    .replace(" Gate", "")
+                    .lower()
+                    .replace(" ", "_")
+                )
+                results.append((gate_key, delta_cagr, strat))
+        return results
+    except Exception:
+        return []
+
+
+def load_regime_winner(
+    buckets: List[str],
+    research_dir: str = "research_outputs",
+) -> Optional[str]:
+    """Return the winning strategy's internal name for the first matching regime bucket.
+
+    Looks up regime_winners.csv for the best scoring strategy in each active bucket.
+    Returns the live strat_name (e.g. "piotroski_f_score") or None if no match.
+    """
+    if not buckets:
+        return None
+    path = Path(research_dir) / "regime_winners.csv"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+        df.columns = [c.strip() for c in df.columns]
+        df["Regime_Bucket"] = df["Regime_Bucket"].str.strip()
+        df["Strategy"] = df["Strategy"].str.strip()
+        # Try each active bucket in order; return first match
+        for bucket in buckets:
+            match = df[df["Regime_Bucket"] == bucket]
+            if not match.empty:
+                display_name = str(match.iloc[0]["Strategy"])
+                return _SHARPE_METRICS_NAME_MAP.get(display_name)
+    except Exception:
+        pass
+    return None
+
+
 def _build_strategy_decisions(
     engine: StrategyEngine,
     trade_date: str,
-    top_n_per_strategy: int,
+    top_n_per_strategy: "int | Dict[str, int]",
     apply_momentum_filter: bool,
+    regime_winner_strat: Optional[str] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    selected_rows: List[Dict[str, str]] = []
+    selected_rows: List[Dict[str, Any]] = []
     momentum_reject_rows: List[Dict[str, str]] = []
     momentum_diag_rows: List[Dict[str, Any]] = []
     ma_period = engine.momentum_filter.ma_period
@@ -872,16 +1008,24 @@ def _build_strategy_decisions(
     for combo_name, strategies in Portfolio.DEFAULT_COMBOS.items():
         for strat_name in strategies:
             label = f"{combo_name} ({strat_name})"
+            effective_top_n = (
+                top_n_per_strategy.get(strat_name, 10)
+                if isinstance(top_n_per_strategy, dict)
+                else top_n_per_strategy
+            )
             result = engine.run_strategy(
                 strat_name,
                 trade_date,
-                top_n=top_n_per_strategy,
+                top_n=effective_top_n,
                 apply_momentum_filter=apply_momentum_filter,
                 capture_diagnostics=True,
             )
 
+            is_regime_winner = regime_winner_strat is not None and strat_name == regime_winner_strat
             for ticker in result.tickers:
-                selected_rows.append({"Ticker": ticker, "Strategy": label})
+                selected_rows.append(
+                    {"Ticker": ticker, "Strategy": label, "RegimeSource": is_regime_winner}
+                )
 
             for ticker in result.metadata.get("momentum_rejected", []):
                 momentum_reject_rows.append(
@@ -918,9 +1062,10 @@ def _build_strategy_decisions(
 
     selected_df = pd.DataFrame(selected_rows)
     if not selected_df.empty:
-        selected_df = selected_df.groupby("Ticker", as_index=False).agg(
-            {"Strategy": _concat_strategy_labels}
-        )
+        agg_dict: Dict[str, Any] = {"Strategy": _concat_strategy_labels}
+        if "RegimeSource" in selected_df.columns:
+            agg_dict["RegimeSource"] = "any"
+        selected_df = selected_df.groupby("Ticker", as_index=False).agg(agg_dict)
         selected_df["Decision"] = "selected"
         selected_df["DecisionStage"] = "strategy"
         selected_df["RejectedReason"] = ""
@@ -1305,6 +1450,18 @@ def run_pipeline(
                 "  Warning: high worker counts can increase SQLite contention on local runs."
             )
 
+    # Warn when a gate that historically hurt returns is currently enabled
+    if cfg.enable_distress_gate:
+        gate_recs = load_gate_recommendations()
+        for gate_key, delta_cagr, source_label in gate_recs:
+            if gate_key == "distress":
+                pct = abs(delta_cagr) * 100
+                print(
+                    f"\n  \u26a0  Backtester: {source_label} reduced CAGR by {pct:.1f}pp over 41-month backtest."
+                    f"\n     Distress gate is currently ENABLED. Use --no-distress-gate to disable."
+                    f"\n     (Source: research_outputs/magic_gate_comparison.csv)"
+                )
+
     def _stop_stage(stage: str) -> None:
         duration = timer.stop(stage)
         if verbose:
@@ -1337,11 +1494,43 @@ def run_pipeline(
         )
         engine.load_data()
 
+        # Load Sharpe-based weights from backtester research (degrade gracefully if absent)
+        sharpe_weights = load_strategy_sharpe_weights()
+        if sharpe_weights is not None:
+            top_n_map = compute_sharpe_top_n(sharpe_weights)
+            if verbose:
+                alloc_str = "  ".join(f"{s}:{n}" for s, n in sorted(top_n_map.items()))
+                print(f"  [Sharpe weights] {alloc_str}  (source: research_outputs/)")
+        else:
+            top_n_map = 10
+            if verbose:
+                print("  [Sharpe weights] research_outputs/strategy_risk_metrics.csv not found, using uniform top_n=10")
+
+        # Detect current market regime and look up the backtester's winner strategy
+        regime_winner_strat: Optional[str] = None
+        try:
+            regime_info = detect_current_regime()
+        except Exception:
+            regime_info = None
+
+        if regime_info is not None:
+            buckets = regime_info.get("buckets", [])
+            regime_winner_strat = load_regime_winner(buckets)
+            if verbose:
+                label = regime_info.get("regime_label", "unknown")
+                if regime_winner_strat:
+                    print(f"  [Regime] {label} → winner: {regime_winner_strat} (RegimeSource=True candidates tagged)")
+                else:
+                    print(f"  [Regime] {label} → no bucket match, using Sharpe weights only")
+        elif verbose:
+            print("  [Regime] Detection skipped (regime_labels.csv unavailable or proxy data missing)")
+
         candidates_df, decision_log, momentum_df = _build_strategy_decisions(
             engine=engine,
             trade_date=trade_date,
-            top_n_per_strategy=10,
+            top_n_per_strategy=top_n_map,
             apply_momentum_filter=apply_momentum_filter,
+            regime_winner_strat=regime_winner_strat,
         )
 
         if decision_log.empty:

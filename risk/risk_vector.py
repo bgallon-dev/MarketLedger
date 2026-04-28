@@ -196,7 +196,13 @@ def build_risk_vector(
     )
     gate_tail = config.enable_tail_gate and (tail_bucket == config.tail_heavy_bucket)
     gate_momentum = config.enable_momentum_gate and (above_ma is not True)
-    gate_valuation = config.enable_valuation_gate and (valuation_passed is not True)
+    # WARN behavior passes through (soft flag only); EXCLUDE and SUPPRESS_SIGNAL trip the gate.
+    # Empty string means the old string-based check fired — treat as failing (backward compat).
+    valuation_behavior = str(row.get("Valuation_Behavior") or "").strip().upper()
+    gate_valuation = config.enable_valuation_gate and (
+        valuation_passed is not True
+        and valuation_behavior in ("EXCLUDE", "SUPPRESS_SIGNAL", "")
+    )
     gate_count = int(gate_distress) + int(gate_tail) + int(gate_momentum) + int(
         gate_valuation
     )

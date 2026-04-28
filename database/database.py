@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import sys
-from typing import Optional, Sequence, List
+from typing import Optional, Sequence, List, Dict
 import pandas as pd
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "financial_data.db")
@@ -145,6 +145,78 @@ def init_database():
         """
         CREATE INDEX IF NOT EXISTS idx_history_ticker_date ON history(ticker_id, date)
     """
+    )
+
+    # Discovery Chronicle entries (computed by discovery_pipeline.py)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS discovery_entries (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker              TEXT NOT NULL,
+            run_date            TEXT NOT NULL,
+            pattern_type        TEXT NOT NULL,
+            severity            TEXT NOT NULL,
+            investment_signal   TEXT,
+            mos_pct             REAL,
+            source_type         TEXT NOT NULL,
+            source_form_type    TEXT,
+            source_filing_date  TEXT,
+            excerpt             TEXT,
+            quant_metric        TEXT,
+            quant_value         REAL,
+            quant_threshold     REAL,
+            discovered_at       TEXT NOT NULL,
+            UNIQUE (ticker, run_date, pattern_type, source_type, source_filing_date)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_discovery_ticker ON discovery_entries(ticker)"
+    )
+
+    # Proximity Engine state vectors (computed by proximity_pipeline.py)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS proximity_vectors (
+            ticker          TEXT NOT NULL,
+            period          TEXT NOT NULL,
+            state_vector    BLOB NOT NULL,
+            fwd_return_12m  REAL,
+            div_cut         INTEGER,
+            computed_at     TEXT NOT NULL,
+            PRIMARY KEY (ticker, period)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_proximity_ticker ON proximity_vectors(ticker)"
+    )
+
+    # Filing-derived mood vectors (computed by mood_pipeline.py)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mood_vectors (
+            ticker                      TEXT NOT NULL,
+            filing_date                 TEXT NOT NULL,
+            accession_no                TEXT,
+            disclosure_pressure         REAL,
+            operational_confidence      REAL,
+            cash_flow_coherence         REAL,
+            narrative_stability         REAL,
+            pct_disclosure_pressure     REAL,
+            pct_operational_confidence  REAL,
+            pct_cash_flow_coherence     REAL,
+            pct_narrative_stability     REAL,
+            composite_mood              REAL,
+            sector                      TEXT,
+            size_bucket                 TEXT,
+            computed_at                 TEXT NOT NULL,
+            PRIMARY KEY (ticker, filing_date)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mood_vectors_ticker ON mood_vectors(ticker)"
     )
 
     conn.commit()
@@ -316,6 +388,28 @@ def _normalize_symbol_list(symbols: Sequence[str]) -> List[str]:
 
 def _chunked(values: Sequence[str], chunk_size: int = 500) -> List[List[str]]:
     return [list(values[i : i + chunk_size]) for i in range(0, len(values), chunk_size)]
+
+
+def get_ticker_sectors(symbols) -> Dict[str, Dict[str, Optional[str]]]:
+    """Return {ticker: {"sector": ..., "industry": ...}} for a list of symbols."""
+    normalized = _normalize_symbol_list(symbols or [])
+    if not normalized:
+        return {}
+
+    result: Dict[str, Dict[str, Optional[str]]] = {}
+    conn = get_connection()
+    try:
+        for chunk in _chunked(normalized):
+            placeholders = ",".join(["?"] * len(chunk))
+            rows = conn.execute(
+                f"SELECT symbol, sector, industry FROM tickers WHERE symbol IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for symbol, sector, industry in rows:
+                result[symbol] = {"sector": sector, "industry": industry}
+    finally:
+        conn.close()
+    return result
 
 
 def get_ticker_history_bulk(symbols, start_date=None, end_date=None) -> pd.DataFrame:

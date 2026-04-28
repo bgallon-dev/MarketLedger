@@ -87,6 +87,20 @@ DATA_CONTRACTS = {
         ],
         "description": "Output with unified risk vectors and gate decisions",
     },
+    "management_output": {
+        "required": ["Ticker", "Management_Credibility_Score"],
+        "optional": [
+            "Management_Credibility_Label",
+            "Management_Claims_Resolved",
+            "Management_Claims_Met",
+            "Capital_Allocation_Score",
+            "Capital_Allocation_Pattern",
+            "Capital_Allocation_Flags",
+            "Capital_Allocation_ROIC_Trend",
+            "Capital_Allocation_FCF_Coverage",
+        ],
+        "description": "Management credibility + capital allocation archaeology scores",
+    },
 }
 
 
@@ -217,6 +231,7 @@ from database.database import (
     get_ticker_history,
     get_ticker_history_bulk,
     get_financial_data_bulk,
+    get_ticker_sectors,
 )
 
 from forensic.forensic_scan import run_forensic_scan
@@ -859,6 +874,35 @@ def _left_merge_new_columns(
     return base_df.merge(add_df[new_cols], on=key, how="left")
 
 
+def _check_sector_concentration(
+    df: pd.DataFrame,
+    threshold: float = 0.40,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Add ConcentrationFlag column; warn if any sector exceeds threshold among selected picks."""
+    df = df.copy()
+    df["ConcentrationFlag"] = False
+    if "Sector" not in df.columns or "Decision" not in df.columns:
+        return df
+    selected = df[df["Decision"] == "selected"]
+    if selected.empty:
+        return df
+    sector_counts = selected["Sector"].value_counts(dropna=True)
+    total = len(selected)
+    flagged_sectors: List[str] = []
+    for sector, count in sector_counts.items():
+        if sector and count / total > threshold:
+            flagged_sectors.append(sector)
+    if flagged_sectors:
+        mask = df["Ticker"].isin(selected[selected["Sector"].isin(flagged_sectors)]["Ticker"])
+        df.loc[mask, "ConcentrationFlag"] = True
+        if verbose:
+            for s in flagged_sectors:
+                pct = int(sector_counts[s] / total * 100)
+                print(f"  [Warning] {pct}% of selected picks are in {s} — sector concentration risk")
+    return df
+
+
 # Mapping from strategy_risk_metrics.csv display names to live StrategyEngine names
 _SHARPE_METRICS_NAME_MAP: Dict[str, str] = {
     "Pure Magic Formula": "magic_formula",
@@ -1193,6 +1237,7 @@ def _prefetch_pipeline_data(
     balance_sheet = get_financial_data_bulk(symbols, "balance_sheet")
     income_statement = get_financial_data_bulk(symbols, "income_statement")
     cash_flow = get_financial_data_bulk(symbols, "cash_flow")
+    sectors = get_ticker_sectors(symbols)
 
     return {
         "history": history,
@@ -1203,6 +1248,7 @@ def _prefetch_pipeline_data(
         "balance_sheet_by_symbol": _financial_map_from_bulk(balance_sheet),
         "income_statement_by_symbol": _financial_map_from_bulk(income_statement),
         "cash_flow_by_symbol": _financial_map_from_bulk(cash_flow),
+        "sectors": sectors,
     }
 
 
@@ -1410,6 +1456,8 @@ def run_pipeline(
     risk_config: Optional[RiskVectorConfig] = None,
     execution_config: Optional[ExecutionConfig] = None,
     use_legacy_debug: bool = False,
+    run_contagion: bool = False,
+    run_management: bool = False,
 ) -> pd.DataFrame:
     """Run the investment pipeline through a dependency-driven node graph."""
     if use_legacy_debug:
@@ -1571,11 +1619,32 @@ def run_pipeline(
 
         if verbose:
             print("\n[3/10] Prefetching Batch Data...")
-        decision_log = context.get("decision_log", pd.DataFrame())
+        decision_log = context.get("decision_log", pd.DataFrame()).copy()
+        candidates_df = context.get("candidates_df", pd.DataFrame()).copy()
         tickers = decision_log["Ticker"].tolist() if not decision_log.empty else []
         prefetched = _prefetch_pipeline_data(tickers, exec_cfg, verbose=verbose)
+
+        # Attach Sector / Industry from DB to both DataFrames
+        sectors_map = prefetched.get("sectors", {})
+        if sectors_map:
+            for df in (decision_log, candidates_df):
+                if df.empty or "Ticker" not in df.columns:
+                    continue
+                if "Sector" not in df.columns:
+                    df["Sector"] = df["Ticker"].map(
+                        lambda t: (sectors_map.get(t) or {}).get("sector")
+                    )
+                if "Industry" not in df.columns:
+                    df["Industry"] = df["Ticker"].map(
+                        lambda t: (sectors_map.get(t) or {}).get("industry")
+                    )
+
         _stop_stage("prefetch")
-        return {"prefetched": prefetched}
+        return {
+            "prefetched": prefetched,
+            "decision_log": decision_log,
+            "candidates_df": candidates_df,
+        }
 
     def forensic_node(context: Dict[str, Any]) -> Dict[str, Any]:
         timer.start("forensic")
@@ -1606,6 +1675,7 @@ def run_pipeline(
                 verbose=verbose,
                 prefetched=context.get("prefetched"),
                 max_workers=forensic_workers,
+                run_contagion=run_contagion,
             )
             if not audited_df.empty:
                 validate_columns(
@@ -1622,6 +1692,12 @@ def run_pipeline(
                 decision_log,
                 audited_df[["Ticker", "Altman Z-Score", "Distress Risk", "Price"]],
             )
+            contagion_cols = [c for c in audited_df.columns if c.startswith("Contagion_")]
+            if contagion_cols:
+                decision_log = _left_merge_new_columns(
+                    decision_log,
+                    audited_df[["Ticker"] + contagion_cols],
+                )
             if cfg.enable_distress_gate and "Distress Risk" in audited_df.columns:
                 safe_picks = audited_df[audited_df["Distress Risk"] == "SAFE"].copy()
             else:
@@ -1658,10 +1734,71 @@ def run_pipeline(
         _stop_stage("safe_filter")
         return {"safe_picks": safe_picks}
 
+    def management_node(context: Dict[str, Any]) -> Dict[str, Any]:
+        timer.start("management")
+        if not run_management:
+            _stop_stage("management")
+            return {}
+        if verbose:
+            print("\n[5/10] Running Management Intelligence Layer...")
+        if context.get("pipeline_abort", False):
+            _stop_stage("management")
+            return {}
+
+        decision_log = context.get("decision_log", pd.DataFrame(columns=["Ticker"])).copy()
+        if decision_log.empty:
+            _stop_stage("management")
+            return {}
+
+        prefetched = context.get("prefetched") or {}
+
+        try:
+            from forensic.credibility_scorer import run_credibility_scan
+            cred_df = run_credibility_scan(
+                decision_log[["Ticker"]],
+                prefetched=prefetched,
+                verbose=verbose,
+                max_workers=exec_cfg.resolved_workers(),
+            )
+            if not cred_df.empty:
+                decision_log = _left_merge_new_columns(decision_log, cred_df)
+        except Exception as exc:
+            if verbose:
+                print(f"  [management] Credibility scan failed (non-blocking): {exc}")
+
+        try:
+            from forensic.capital_archaeologist import run_capital_archaeology_scan
+            arch_df = run_capital_archaeology_scan(
+                decision_log[["Ticker"]],
+                prefetched=prefetched,
+                verbose=verbose,
+                max_workers=exec_cfg.resolved_workers(),
+            )
+            if not arch_df.empty:
+                decision_log = _left_merge_new_columns(decision_log, arch_df)
+        except Exception as exc:
+            if verbose:
+                print(f"  [management] Archaeology scan failed (non-blocking): {exc}")
+
+        if verbose:
+            mgmt_cols = [c for c in decision_log.columns if c.startswith("Management_") or c.startswith("Capital_Allocation_")]
+            if mgmt_cols:
+                cred_col = "Management_Credibility_Label"
+                arch_col = "Capital_Allocation_Pattern"
+                if cred_col in decision_log.columns:
+                    counts = decision_log[cred_col].value_counts()
+                    print("  [management] Credibility: " + ", ".join(f"{v} {k}" for k, v in counts.items()))
+                if arch_col in decision_log.columns:
+                    patterns = decision_log[arch_col].value_counts()
+                    print("  [management] Allocation: " + ", ".join(f"{v} {k}" for k, v in patterns.items()))
+
+        _stop_stage("management")
+        return {"decision_log": decision_log}
+
     def valuation_node(context: Dict[str, Any]) -> Dict[str, Any]:
         timer.start("valuation")
         if verbose:
-            print("\n[5/10] Running Valuation Layer...")
+            print("\n[6/10] Running Valuation Layer..." if run_management else "\n[5/10] Running Valuation Layer...")
         if context.get("pipeline_abort", False):
             _stop_stage("valuation")
             return {"valuation_df": pd.DataFrame(columns=["Ticker"])}
@@ -1704,7 +1841,7 @@ def run_pipeline(
     def tail_risk_node(context: Dict[str, Any]) -> Dict[str, Any]:
         timer.start("tail_risk")
         if verbose:
-            print("\n[6/10] Running Tail-Risk Fits...")
+            print("\n[7/10] Running Tail-Risk Fits..." if run_management else "\n[6/10] Running Tail-Risk Fits...")
         if context.get("pipeline_abort", False):
             _stop_stage("tail_risk")
             return {"tail_df": pd.DataFrame(columns=["Ticker"])}
@@ -1727,7 +1864,7 @@ def run_pipeline(
     def risk_vector_node(context: Dict[str, Any]) -> Dict[str, Any]:
         timer.start("risk_vector")
         if verbose:
-            print("\n[7/10] Building Unified Risk Vectors...")
+            print("\n[8/10] Building Unified Risk Vectors..." if run_management else "\n[7/10] Building Unified Risk Vectors...")
         if context.get("pipeline_abort", False):
             _stop_stage("risk_vector")
             return {"decision_log": pd.DataFrame(columns=["Ticker"])}
@@ -1813,8 +1950,17 @@ def run_pipeline(
             if display_cols and not final_portfolio.empty:
                 print(final_portfolio[display_cols].to_string(index=False))
 
+        # Sector concentration check — tags ConcentrationFlag and prints warnings
+        if not decision_log.empty:
+            decision_log = _check_sector_concentration(decision_log, verbose=verbose)
+            final_portfolio = (
+                decision_log[decision_log["Decision"] == "selected"].copy()
+                if "Decision" in decision_log.columns
+                else final_portfolio
+            )
+
         _stop_stage("decision")
-        return {"final_portfolio": final_portfolio}
+        return {"final_portfolio": final_portfolio, "decision_log": decision_log}
 
     def export_node(context: Dict[str, Any]) -> Dict[str, Any]:
         timer.start("export")
@@ -1860,8 +2006,13 @@ def run_pipeline(
         ),
         PipelineNode("safe_filter_node", {"forensic_node"}, safe_filter_node),
         PipelineNode(
-            "valuation_node",
+            "management_node",
             {"safe_filter_node", "prefetch_data_node"},
+            management_node,
+        ),
+        PipelineNode(
+            "valuation_node",
+            {"management_node", "safe_filter_node", "prefetch_data_node"},
             valuation_node,
         ),
         PipelineNode(
@@ -2021,6 +2172,34 @@ Examples:
         help="Disable decision log CSV export.",
     )
 
+    forensic_ext_group = parser.add_argument_group("Forensic Extensions")
+    forensic_ext_group.add_argument(
+        "--contagion",
+        action="store_true",
+        help=(
+            "Enable Sector Contagion Tracer: fetch SEC 10-K filings via EDGAR, "
+            "compute MinHash similarity, and score each company as Leader / "
+            "Follower / Isolated within its sector. Requires internet access. "
+            "Adds Contagion_* columns to the decision log. Results are cached "
+            "in financial_data.db for 90 days."
+        ),
+    )
+    forensic_ext_group.add_argument(
+        "--management",
+        action="store_true",
+        help=(
+            "Enable Management Intelligence Layer: runs two complementary analyses. "
+            "(1) Longitudinal Credibility Scorer — extracts forward-looking statements "
+            "from 10-K Item 7 (MD&A) via SEC EDGAR and tracks them against subsequent "
+            "financial outcomes, building a per-management credibility score over time. "
+            "(2) Capital Allocation Archaeologist — detects gaps between stated priorities "
+            "(organic growth, dividend commitment, buybacks) and actual multi-year "
+            "financial behavior using existing prefetched data. Requires internet access "
+            "for new tickers; results are cached in financial_data.db. "
+            "Adds Management_Credibility_* and Capital_Allocation_* columns."
+        ),
+    )
+
     compatibility_group = parser.add_argument_group("Compatibility")
     compatibility_group.add_argument(
         "--legacy-pipeline",
@@ -2108,6 +2287,8 @@ def main(argv=None):
         risk_config=risk_config,
         execution_config=execution_config,
         use_legacy_debug=args.legacy_pipeline,
+        run_contagion=args.contagion,
+        run_management=args.management,
     )
 
     # Exit with appropriate code

@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3 /c/Users/Benjamin/Documents/Yahoo_project/MarketLedger/database/paper_trading.db \".schema positions\")",
+      "Bash(py -c \"from database.database import get_ticker_sectors; print\\('OK'\\)\")",
+      "Bash(py -c \"from valuation.valuation_projector import detect_entity_type, _yield_scenario_valuations, _get_annual_distributions; print\\(detect_entity_type\\('Real Estate', 'REIT - Office'\\)\\); print\\(detect_entity_type\\('Energy', 'Oil & Gas Midstream'\\)\\); print\\(detect_entity_type\\('Technology', 'Software'\\)\\)\")",
+      "Bash(py -c \"from paper_trading_engine import PaperPortfolio, return_attribution_report; print\\('OK'\\)\")",
+      "Bash(py -c ' *)",
+      "Bash(py -c \"import py_compile; py_compile.compile\\('main.py'\\); py_compile.compile\\('paper_trading_engine.py'\\); py_compile.compile\\('valuation/valuation_projector.py'\\); py_compile.compile\\('database/database.py'\\); print\\('All syntax OK'\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python /c/Users/Benjamin/Documents/Yahoo_project/MarketLedger/database/database.py)",
+      "Bash(python -c ' *)",
+      "Bash(where python *)",
+      "Bash(where python3 *)",
+      "Bash(where py *)",
+      "Read(//c/Users/Benjamin/AppData/Local/Programs/Python//**)",
+      "Bash(py -m pip install streamlit plotly --quiet)",
+      "Bash(py -c \"import streamlit; import plotly; print\\('streamlit', streamlit.__version__, 'plotly', plotly.__version__\\)\")",
+      "Bash(py -m main --help)",
+      "Bash(py -c \"from forensic.contagion import run_contagion_scan, fetch_filing_history, _get_cached_filings_n; print\\('contagion OK'\\)\")",
+      "Bash(py -c \"from forensic.credibility_scorer import run_credibility_scan, extract_forward_claims, compute_credibility_score; print\\('credibility_scorer OK'\\)\")",
+      "Bash(py -c \"from forensic.capital_archaeologist import run_capital_archaeology_scan, detect_acquisition_pattern, compute_capital_allocation_score; print\\('capital_archaeologist OK'\\)\")",
+      "Bash(py -c \"from main import run_pipeline, build_parser; p = build_parser\\(\\); args = p.parse_args\\(['--management']\\); print\\('management flag:', args.management\\); print\\('contagion flag:', args.contagion\\)\")",
+      "Bash(py -m main --no-parallel --max-workers 1 --quiet --selected-only)",
+      "Bash(py -m main --no-parallel --max-workers 1 --quiet --selected-only --no-distress-gate)",
+      "Read(//c/Users/Benjamin/Documents/Yahoo_project/**)",
+      "PowerShell(netstat -an)",
+      "PowerShell(Get-NetFirewallRule -DisplayName \"Streamlit 8501\" -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-NetConnectionProfile)",
+      "PowerShell(Set-NetConnectionProfile -InterfaceAlias \"Ethernet\" -NetworkCategory Private)",
+      "Bash(py -m forensic.run_all --help)",
+      "Bash(py -m forensic.run_all --tickers AAPL MSFT GIII KOP --archaeology-only)",
+      "Bash(sed 's/\\\\.cpython-.*//')",
+      "Bash(py -c \"import py_compile; py_compile.compile\\('forensic/regime_early_warning.py', doraise=True\\); print\\('OK: regime_early_warning.py'\\)\")",
+      "Bash(py -c \"import py_compile; py_compile.compile\\('Utils/backtester.py', doraise=True\\); print\\('OK: backtester.py'\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\('dashboard/experimental/mood_pipeline.py'\\).read\\(\\)\\); print\\('mood_pipeline.py OK'\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\('dashboard/utils/mood.py'\\).read\\(\\)\\); print\\('mood.py OK'\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\('dashboard/pages/2_Stock_Detail.py'\\).read\\(\\)\\); print\\('2_Stock_Detail.py OK'\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\('database/database.py'\\).read\\(\\)\\); print\\('database.py OK'\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\('dashboard/utils/mood.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+    ]
+  }
+}

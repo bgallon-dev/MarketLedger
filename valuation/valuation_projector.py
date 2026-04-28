@@ -97,6 +97,71 @@ STRATEGY_VALUATION_PARAMS: Dict[str, ValuationParams] = {
 }
 
 
+# Required yield rates used for REIT/MLP yield-based valuation
+ENTITY_YIELD_TARGETS: Dict[str, float] = {
+    "reit": 0.06,   # 6% cap rate / dividend yield for REITs
+    "mlp":  0.09,   # 9% distribution yield for MLPs
+}
+
+
+def detect_entity_type(sector: Optional[str], industry: Optional[str]) -> str:
+    """Return 'reit', 'mlp', or 'standard' based on sector/industry metadata."""
+    sector_l = (sector or "").lower()
+    industry_l = (industry or "").lower()
+    reit_keywords = {"real estate", "reit"}
+    mlp_keywords = {"midstream", "pipeline", "master limited", "oil & gas storage", "partnership"}
+    if any(k in sector_l for k in reit_keywords) or any(k in industry_l for k in reit_keywords):
+        return "reit"
+    if any(k in industry_l for k in mlp_keywords):
+        return "mlp"
+    if "energy" in sector_l and "partnership" in industry_l:
+        return "mlp"
+    return "standard"
+
+
+def _get_annual_distributions(hist: pd.DataFrame) -> Optional[float]:
+    """Sum non-zero dividend/distribution payments in the trailing 12 months."""
+    if hist is None or hist.empty or "dividends" not in hist.columns:
+        return None
+    hist = hist.copy()
+    hist["date"] = pd.to_datetime(hist["date"], utc=True, errors="coerce").dt.tz_localize(None)
+    cutoff = hist["date"].max() - pd.Timedelta(days=365)
+    recent = hist[hist["date"] >= cutoff]
+    events = recent["dividends"].dropna()
+    events = events[events > 0]
+    if len(events) < 2:
+        return None
+    return float(events.sum())
+
+
+def _yield_scenario_valuations(
+    annual_distributions: float,
+    entity_type: str,
+) -> Dict[str, Any]:
+    """Bear/Base/Bull scenarios for yield-based entities (REITs, MLPs)."""
+    base_yield = ENTITY_YIELD_TARGETS.get(entity_type, 0.07)
+    bear_yield = base_yield * 1.25   # higher required yield → lower price
+    bull_yield = base_yield * 0.75   # lower required yield → higher price
+
+    base_value = annual_distributions / base_yield
+    bear_value = annual_distributions / bear_yield
+    bull_value = annual_distributions / bull_yield
+
+    prob_weighted = 0.25 * bear_value + 0.50 * base_value + 0.25 * bull_value
+    spread = ((bull_value - bear_value) / base_value * 100) if base_value > 0 else 0
+    method = "DDM" if entity_type == "reit" else "Dist_Yield"
+
+    return {
+        "bear_value": round(bear_value, 2),
+        "base_value": round(base_value, 2),
+        "bull_value": round(bull_value, 2),
+        "prob_weighted_value": round(prob_weighted, 2),
+        "valuation_method": method,
+        "scenario_spread": round(spread, 1),
+        "strategy_params": f"{entity_type.upper()} yield model: base yield {base_yield*100:.0f}%",
+    }
+
+
 def get_strategy_params(strategy: Optional[str]) -> ValuationParams:
     """
     Get valuation parameters for a given strategy.
@@ -150,52 +215,12 @@ DEFAULT_SCENARIO_CONFIG = ScenarioConfig()
 # VALUATION SANITY GATE - Catch unrealistic valuations
 # ==============================================================================
 
-
-@dataclass
-class SanityGateConfig:
-    """Configuration for valuation sanity checks."""
-
-    min_fair_value: float = 0.0  # Fair value must be positive
-    min_price_ratio: float = 0.2  # FV >= 0.2 * Current Price
-    max_price_ratio: float = 5.0  # FV <= 5.0 * Current Price
-
-
-DEFAULT_SANITY_CONFIG = SanityGateConfig()
-
-
-def check_valuation_sanity(
-    fair_value: float,
-    current_price: float,
-    config: Optional[SanityGateConfig] = None,
-) -> Tuple[bool, str]:
-    """
-    Check if a valuation result passes sanity checks.
-
-    Args:
-        fair_value: Calculated fair value
-        current_price: Current market price
-        config: Sanity gate configuration
-
-    Returns:
-        Tuple of (passes_sanity, failure_reason)
-    """
-    config = config or DEFAULT_SANITY_CONFIG
-
-    if fair_value <= config.min_fair_value:
-        return (False, "Non-positive fair value")
-
-    if current_price <= 0:
-        return (False, "Invalid current price")
-
-    ratio = fair_value / current_price
-
-    if ratio < config.min_price_ratio:
-        return (False, f"FV too low ({ratio:.1f}x price)")
-
-    if ratio > config.max_price_ratio:
-        return (False, f"FV too high ({ratio:.1f}x price)")
-
-    return (True, "Passed")
+from valuation.valuation_sanity_gate import (
+    run_sanity_gate,
+    SanityContext,
+    _get_metric_series,
+    check_valuation_sanity,   # re-exported for backtester / other callers
+)
 
 
 def classify_investment_signal(
@@ -679,6 +704,8 @@ def _analyze_ticker_valuation(
     prefetched_cash_flow: Optional[pd.DataFrame] = None,
     prefetched_balance_sheet: Optional[pd.DataFrame] = None,
     prefetched_income_statement: Optional[pd.DataFrame] = None,
+    sector: Optional[str] = None,
+    industry: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Perform valuation analysis on a single ticker with scenario bands.
@@ -782,13 +809,26 @@ def _analyze_ticker_valuation(
 
         # ==================================================================
         # SCENARIO-BASED VALUATION (Bear / Base / Bull)
+        # Route REITs and MLPs to yield-based models before DCF waterfall
         # ==================================================================
-        scenario_results = calculate_scenario_valuations(
-            fcf_per_share=fcf_per_share,
-            sales_per_share=sales_per_share,
-            book_value_per_share=book_value_per_share,
-            strategy=strategy,
-        )
+        entity_type = detect_entity_type(sector, industry)
+        scenario_results = None
+
+        if entity_type in ("reit", "mlp"):
+            annual_dist = _get_annual_distributions(hist)
+            if annual_dist is not None and annual_dist > 0:
+                scenario_results = _yield_scenario_valuations(annual_dist, entity_type)
+                if verbose:
+                    model_label = "DDM" if entity_type == "reit" else "Dist_Yield"
+                    print(f"  {ticker}: {model_label} ({entity_type.upper()}, dist=${annual_dist:.2f}/sh proxy)")
+
+        if scenario_results is None:
+            scenario_results = calculate_scenario_valuations(
+                fcf_per_share=fcf_per_share,
+                sales_per_share=sales_per_share,
+                book_value_per_share=book_value_per_share,
+                strategy=strategy,
+            )
 
         bear_value = scenario_results["bear_value"]
         base_value = scenario_results["base_value"]
@@ -838,13 +878,35 @@ def _analyze_ticker_valuation(
         # ==================================================================
         # VALUATION SANITY GATE
         # ==================================================================
-        sanity_passed, sanity_reason = check_valuation_sanity(
+        fcf_series_raw = _get_metric_series(cash_flow, "FreeCashFlow", n_periods=5)
+        operating_income_latest = _get_latest_metric(income_stmt, "OperatingIncome") or 0.0
+
+        sanity_ctx = SanityContext(
+            ticker=ticker,
             fair_value=prob_weighted_value,
             current_price=current_price,
+            valuation_method=valuation_method,
+            fcf_latest=fcf,
+            fcf_series=fcf_series_raw,
+            total_revenue=total_revenue,
+            stockholders_equity=stockholders_equity,
+            operating_income=operating_income_latest,
+            shares_outstanding=shares,
+            sector=sector,
+            company_name=None,
+            market_cap_mm=None,
+            strategy=strategy,
         )
+        sanity_result = run_sanity_gate(sanity_ctx)
+        sanity_passed = sanity_result.passed
+        sanity_reason = sanity_result.reason
+        sanity_diagnostics = sanity_result.diagnostics
+        sanity_behavior = sanity_result.behavior
 
         if not sanity_passed and verbose:
-            print(f"  ⚠ {ticker}: Sanity check failed - {sanity_reason}")
+            print(f"  ⚠ {ticker}: Sanity [{sanity_behavior}] — {sanity_reason}")
+            if sanity_result.failure_codes:
+                print(f"    codes: {sanity_diagnostics}")
 
         # ==================================================================
         # INVESTMENT SIGNAL CLASSIFICATION (Bear MOS-based)
@@ -875,6 +937,8 @@ def _analyze_ticker_valuation(
             "Scenario Spread %": f"{scenario_spread:.0f}%",
             # Sanity gate results
             "Valuation Sanity": "Passed" if sanity_passed else sanity_reason,
+            "Valuation_Diagnostics": sanity_diagnostics,
+            "Valuation_Behavior": sanity_behavior,
             # Investment signal (preliminary - updated after forensic/risk)
             "Investment Signal": investment_signal,
             "Signal Reason": signal_reason,
@@ -1000,6 +1064,8 @@ def run_valuation_scan(
                 prefetched_cash_flow=cashflow_map.get(ticker),
                 prefetched_balance_sheet=bs_map.get(ticker),
                 prefetched_income_statement=inc_map.get(ticker),
+                sector=row.get("Sector"),
+                industry=row.get("Industry"),
             )
             if result:
                 result["_order"] = order
@@ -1019,6 +1085,8 @@ def run_valuation_scan(
                     cashflow_map.get(ticker),
                     bs_map.get(ticker),
                     inc_map.get(ticker),
+                    row.get("Sector"),
+                    row.get("Industry"),
                 )
                 futures[future] = order
 

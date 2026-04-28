@@ -368,7 +368,12 @@ def run_data_fetch(
             show_progress=show_progress,
         )
 
-    # Default behavior: fetch all NYSE tickers
+    # Default behavior: fetch universe matching the exchange argument
+    ex_upper = (exchange or "NYSE").upper()
+    if ex_upper in ("NASDAQ",):
+        return fetch_nasdaq_data(verbose=verbose, show_progress=show_progress)
+    if ex_upper in ("SP500", "S&P500", "SPX"):
+        return fetch_sp500_data(verbose=verbose, show_progress=show_progress)
     return fetch_nyse_data(verbose=verbose, show_progress=show_progress)
 
 

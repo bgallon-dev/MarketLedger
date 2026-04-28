@@ -4181,6 +4181,8 @@ def _default_tournament_contenders() -> List[Dict[str, Any]]:
 def detect_current_regime(
     research_dir: str = "research_outputs",
     lookback_days: int = 365,
+    include_filing_signal: bool = False,
+    filing_signal_tickers: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Classify the current market regime from trailing proxy price data.
 
@@ -4366,7 +4368,7 @@ def detect_current_regime(
         parts.append("Value rotation")
     regime_label = " / ".join(parts)
 
-    return {
+    result: Dict[str, Any] = {
         "Market_Regime": market_regime,
         "Value_Rotation": value_rotation,
         "Rate_Regime": rate_regime,
@@ -4377,6 +4379,23 @@ def detect_current_regime(
         "iwf_return": iwf_return,
         "irx_mean_annual": irx_mean_annual,
     }
+
+    if include_filing_signal:
+        try:
+            # Deferred import — keeps the default code path free of the module load cost
+            from forensic.regime_early_warning import RegimeEarlyWarningSystem
+            rew = RegimeEarlyWarningSystem(verbose=False)
+            tickers = filing_signal_tickers or rew._get_cached_tickers(cap=200)
+            filing = rew.score_current(tickers, output_dir=Path(research_dir))
+            result["filing_transition_score"] = filing.get("filing_transition_score")
+            result["filing_transition_label"] = filing.get("transition_risk_label")
+            result["filing_top_drivers"] = filing.get("top_drivers")
+        except Exception:
+            result["filing_transition_score"] = None
+            result["filing_transition_label"] = None
+            result["filing_top_drivers"] = None
+
+    return result
 
 
 def run_strategy_tournament(

@@ -281,6 +281,7 @@ def run_forensic_scan(
     verbose: bool = True,
     prefetched: Optional[Dict[str, Any]] = None,
     max_workers: Optional[int] = None,
+    run_contagion: bool = False,
 ) -> pd.DataFrame:
     """
     Run forensic analysis on a buy list DataFrame.
@@ -375,5 +376,34 @@ def run_forensic_scan(
     merge_cols = ["Ticker", "Altman Z-Score", "Distress Risk", "Price"]
     forensic_subset = forensic_df[[c for c in merge_cols if c in forensic_df.columns]]
     result_df = buy_list_df.merge(forensic_subset, on="Ticker", how="left")
+
+    # ── Contagion scan (optional) ──────────────────────────────────────────────
+    if run_contagion:
+        try:
+            from forensic.contagion import run_contagion_scan
+            if verbose:
+                print("  [contagion] Starting Sector Contagion Tracer...")
+            contagion_df = run_contagion_scan(
+                result_df[["Ticker"]],
+                prefetched=prefetched,
+                verbose=verbose,
+                max_workers=max_workers,
+            )
+            if not contagion_df.empty:
+                new_cols = [c for c in contagion_df.columns if c != "Ticker"]
+                result_df = result_df.merge(
+                    contagion_df[["Ticker"] + new_cols], on="Ticker", how="left"
+                )
+        except Exception as exc:
+            if verbose:
+                print(f"  [contagion] Scan failed (non-blocking): {exc}")
+            _CONTAGION_COLS = [
+                "Contagion_Leadership_Score", "Contagion_Disclosure_Rank",
+                "Contagion_Peer_Count", "Contagion_Novel_Risks",
+                "Contagion_Filing_Date",
+            ]
+            for col in _CONTAGION_COLS:
+                result_df[col] = None
+            result_df["Contagion_Risk_Label"] = "Insufficient Data"
 
     return result_df

@@ -599,6 +599,7 @@ class DataProvider:
         self.verbose = verbose
         self.tickers_df: Optional[pd.DataFrame] = None
         self._price_cache: Dict[str, pd.Series] = {}
+        self._snapshot_cache: Dict[str, pd.DataFrame] = {}
 
     def _log(self, message: str) -> None:
         if self.verbose:
@@ -633,6 +634,10 @@ class DataProvider:
         pd.DataFrame
             Financial snapshot with Ticker as index
         """
+        cache_key = f"{trade_date}:{id(metrics) if metrics else 'default'}"
+        if cache_key in self._snapshot_cache:
+            return self._snapshot_cache[cache_key].copy()
+
         trade_dt = pd.to_datetime(trade_date)
         cutoff_dt = trade_dt - timedelta(days=self.reporting_lag_days)
         cutoff_str = cutoff_dt.strftime("%Y-%m-%d")
@@ -687,6 +692,7 @@ class DataProvider:
 
         snapshot = pd.DataFrame(all_data).set_index("Ticker")
         self._log(f"Built snapshot with {len(snapshot)} tickers.")
+        self._snapshot_cache[cache_key] = snapshot
         return snapshot
 
     def get_prices(self, tickers: List[str], trade_date: str) -> pd.Series:
@@ -788,8 +794,9 @@ class DataProvider:
         return pd.DataFrame(results).set_index("Ticker")
 
     def clear_cache(self) -> None:
-        """Clear price cache."""
+        """Clear price and snapshot caches."""
         self._price_cache.clear()
+        self._snapshot_cache.clear()
 
 
 # ==============================================================================
